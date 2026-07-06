@@ -1,5 +1,5 @@
-import { Field, PlusIcon, Select, TextArea, TextInput } from './ui'
-import type { Driver, DriverFields, DriverType, LineItem, PayTermSplit } from '../lib/types'
+import { Field, LabelCaps, PlusIcon, Select, TextArea, TextInput } from './ui'
+import type { CurveRow, Driver, DriverFields, DriverType, LineItem, NetsuiteMapping } from '../lib/types'
 
 const PERIOD_KEYS = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6']
 
@@ -41,11 +41,19 @@ export function defaultFrequencyForType(type: DriverType, fields: DriverFields):
     case 'erp_trailing_stat':
     case 'erp_due_date_direct':
       return 'Weekly'
+    case 'recurring': {
+      const basis = fields.payBasis ?? 'Weekly'
+      const freq = fields.recurringFrequency && fields.recurringFrequency > 1 ? ` ×${fields.recurringFrequency}` : ''
+      return `${basis}${freq}`
+    }
     case 'dso':
     case 'dpo':
     case 'calibration_factor':
-    case 'pay_terms_distribution':
       return 'Monthly review'
+    case 'collection_curve':
+      return fields.calibrationSource === 'derived_from_history'
+        ? `Weekly, calibration refreshed ${fields.refreshCadence ?? 'Monthly'}`
+        : 'Weekly'
     case 'ml_suggested':
       return 'Weekly'
     case 'ratio':
@@ -53,6 +61,48 @@ export function defaultFrequencyForType(type: DriverType, fields: DriverFields):
     default:
       return 'Weekly'
   }
+}
+
+export function NetSuiteMappingFields({
+  mapping,
+  onChange,
+}: {
+  mapping: NetsuiteMapping
+  onChange: (patch: Partial<NetsuiteMapping>) => void
+}) {
+  return (
+    <div className="space-y-3 rounded-input border border-dashed border-border-input bg-page/50 p-4">
+      <div className="flex items-baseline justify-between">
+        <LabelCaps>NetSuite Mapping</LabelCaps>
+        <span className="text-xs text-ink-muted">Optional, any driver type</span>
+      </div>
+      <p className="text-xs text-ink-secondary">
+        If set, a real NetSuite transaction for this driver in a given period takes hard precedence over its
+        declared forecast method for that period — never a blend.
+      </p>
+      <Field label="Subsidiary/Entity">
+        <TextInput
+          value={mapping.subsidiary ?? ''}
+          onChange={(e) => onChange({ subsidiary: e.target.value || null })}
+          placeholder="e.g. ChargePoint Inc (US)"
+        />
+      </Field>
+      <Field label="Account/Record">
+        <TextInput
+          value={mapping.account ?? ''}
+          onChange={(e) => onChange({ account: e.target.value || null })}
+          placeholder="e.g. 1200 · Accounts Receivable"
+        />
+      </Field>
+      <Field label="Query description">
+        <TextInput
+          value={mapping.queryDescription ?? ''}
+          onChange={(e) => onChange({ queryDescription: e.target.value || null })}
+          placeholder="e.g. SuiteQL: transactionline WHERE …"
+        />
+      </Field>
+    </div>
+  )
 }
 
 export function DriverTypeFields({
@@ -151,19 +201,9 @@ export function DriverTypeFields({
     case 'erp_trailing_stat':
       return (
         <>
-          <Field label="NetSuite Subsidiary/Entity">
-            <TextInput value={fields.subsidiary ?? ''} onChange={(e) => set({ subsidiary: e.target.value })} />
-          </Field>
-          <Field label="NetSuite Account/Record">
-            <TextInput value={fields.account ?? ''} onChange={(e) => set({ account: e.target.value })} />
-          </Field>
-          <Field label="Query/Extraction method">
-            <TextInput
-              value={fields.queryMethod ?? ''}
-              onChange={(e) => set({ queryMethod: e.target.value })}
-              placeholder="e.g. SuiteQL: transactionline WHERE …"
-            />
-          </Field>
+          <p className="text-xs text-ink-secondary">
+            NetSuite Subsidiary/Account are set in the NetSuite Mapping section below — required for this type.
+          </p>
           <Field label="Actuals horizon (weeks)">
             <TextInput
               type="number"
@@ -184,18 +224,66 @@ export function DriverTypeFields({
     case 'erp_due_date_direct':
       return (
         <>
-          <Field label="NetSuite Subsidiary/Entity">
-            <TextInput value={fields.subsidiary ?? ''} onChange={(e) => set({ subsidiary: e.target.value })} />
-          </Field>
-          <Field label="NetSuite Account/Record">
-            <TextInput value={fields.account ?? ''} onChange={(e) => set({ account: e.target.value })} />
-          </Field>
+          <p className="text-xs text-ink-secondary">
+            NetSuite Subsidiary/Account are set in the NetSuite Mapping section below — required for this type.
+          </p>
           <Field label="Due-date field reference">
             <TextInput
               value={fields.dueDateFieldRef ?? ''}
               onChange={(e) => set({ dueDateFieldRef: e.target.value })}
               placeholder="e.g. duedate on open VendBill records"
             />
+          </Field>
+        </>
+      )
+
+    case 'recurring':
+      return (
+        <>
+          <Field label="Pay Basis">
+            <Select
+              value={fields.payBasis ?? 'Monthly'}
+              onChange={(v) => set({ payBasis: v as DriverFields['payBasis'] })}
+              options={[
+                { value: 'Monthly', label: 'Monthly' },
+                { value: 'Weekly', label: 'Weekly' },
+                { value: 'Quarterly', label: 'Quarterly' },
+                { value: 'Annual', label: 'Annual' },
+              ]}
+            />
+          </Field>
+          <Field label="Start Period">
+            <TextInput type="date" value={fields.startPeriod ?? ''} onChange={(e) => set({ startPeriod: e.target.value })} />
+          </Field>
+          <Field label="Recurring Frequency" hint="Interval count — 1 = every occurrence, 2 = every other">
+            <TextInput
+              type="number"
+              min={1}
+              value={fields.recurringFrequency ?? 1}
+              onChange={(e) => set({ recurringFrequency: Number(e.target.value) })}
+            />
+          </Field>
+          <Field label="Number of Occurrences">
+            <div className="flex items-center gap-3">
+              <TextInput
+                type="number"
+                disabled={fields.indefiniteOccurrences}
+                value={fields.indefiniteOccurrences ? '' : fields.numberOfOccurrences ?? ''}
+                onChange={(e) => set({ numberOfOccurrences: Number(e.target.value) })}
+                className="disabled:bg-page disabled:text-ink-muted"
+              />
+              <label className="flex items-center gap-1.5 whitespace-nowrap text-sm text-ink-secondary">
+                <input
+                  type="checkbox"
+                  checked={!!fields.indefiniteOccurrences}
+                  onChange={(e) => set({ indefiniteOccurrences: e.target.checked })}
+                />
+                Indefinite / until model end
+              </label>
+            </div>
+          </Field>
+          <Field label="Amount" hint="Fixed amount per occurrence">
+            <TextInput type="number" value={fields.amount ?? ''} onChange={(e) => set({ amount: Number(e.target.value) })} />
           </Field>
         </>
       )
@@ -232,56 +320,102 @@ export function DriverTypeFields({
         </>
       )
 
-    case 'pay_terms_distribution': {
-      const splits = fields.splits ?? []
-      const totalWeight = splits.reduce((s, sp) => s + (sp.weightPct || 0), 0)
-      const updateSplit = (i: number, patch: Partial<PayTermSplit>) => {
-        const next = splits.map((sp, idx) => (idx === i ? { ...sp, ...patch } : sp))
-        set({ splits: next })
+    case 'collection_curve': {
+      const rows = fields.curveRows ?? []
+      const totalPct = rows.reduce((s, r) => s + (r.percentage || 0), 0)
+      const updateRow = (i: number, patch: Partial<CurveRow>) => {
+        const next = rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r))
+        set({ curveRows: next })
       }
+      const referenceOptions = [
+        { value: '', label: 'Select a driver or line item…' },
+        ...drivers.filter((d) => d.id !== excludeDriverId).map((d) => ({ value: d.id, label: `Driver · ${d.name}` })),
+        ...lineItems.map((li) => ({ value: li.id, label: `Line item · ${li.name}` })),
+      ]
       return (
-        <Field label="Offset-day weights">
-          <div className="space-y-2">
-            {splits.map((sp, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <div className="flex flex-1 items-center gap-1">
-                  <span className="text-sm text-ink-secondary">+</span>
-                  <TextInput
-                    type="number"
-                    value={sp.offsetDays}
-                    onChange={(e) => updateSplit(i, { offsetDays: Number(e.target.value) })}
-                  />
-                  <span className="text-sm text-ink-secondary">days</span>
+        <>
+          <Field label="Source reference" hint="Typically a Billings driver — the series this curve reads from">
+            <Select value={fields.sourceRef ?? ''} onChange={(v) => set({ sourceRef: v })} options={referenceOptions} />
+          </Field>
+          <Field label="Applicability window">
+            <Select
+              value={fields.applicabilityWindow ?? 'forecasted_only'}
+              onChange={(v) => set({ applicabilityWindow: v as DriverFields['applicabilityWindow'] })}
+              options={[
+                { value: 'forecasted_only', label: 'Forecasted periods only (default)' },
+                { value: 'all_periods', label: 'All periods' },
+              ]}
+            />
+          </Field>
+          <Field label="Curve">
+            <div className="space-y-2">
+              {rows.map((r, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <div className="flex flex-1 items-center gap-1">
+                    <span className="text-sm text-ink-secondary">Offset</span>
+                    <TextInput
+                      type="number"
+                      value={r.offsetPeriods}
+                      onChange={(e) => updateRow(i, { offsetPeriods: Number(e.target.value) })}
+                    />
+                    <span className="text-sm text-ink-secondary">periods</span>
+                  </div>
+                  <div className="flex flex-1 items-center gap-1">
+                    <TextInput
+                      type="number"
+                      value={r.percentage}
+                      onChange={(e) => updateRow(i, { percentage: Number(e.target.value) })}
+                    />
+                    <span className="text-sm text-ink-secondary">%</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => set({ curveRows: rows.filter((_, idx) => idx !== i) })}
+                    className="text-ink-muted hover:text-red-text"
+                    aria-label="Remove curve row"
+                  >
+                    ✕
+                  </button>
                 </div>
-                <div className="flex flex-1 items-center gap-1">
-                  <TextInput
-                    type="number"
-                    value={sp.weightPct}
-                    onChange={(e) => updateSplit(i, { weightPct: Number(e.target.value) })}
-                  />
-                  <span className="text-sm text-ink-secondary">%</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => set({ splits: splits.filter((_, idx) => idx !== i) })}
-                  className="text-ink-muted hover:text-red-text"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-            <button
-              type="button"
-              onClick={() => set({ splits: [...splits, { offsetDays: 0, weightPct: 0 }] })}
-              className="flex items-center gap-1 text-sm font-medium text-ink-primary hover:underline"
-            >
-              <PlusIcon className="h-3.5 w-3.5" /> Add split
-            </button>
-            <p className={`text-xs ${totalWeight === 100 ? 'text-green-text' : 'text-red-text'}`}>
-              Weights sum to {totalWeight}% {totalWeight === 100 ? '✓' : '— must total 100%'}
-            </p>
-          </div>
-        </Field>
+              ))}
+              <button
+                type="button"
+                onClick={() => set({ curveRows: [...rows, { offsetPeriods: rows.length, percentage: 0 }] })}
+                className="flex items-center gap-1 text-sm font-medium text-ink-primary hover:underline"
+              >
+                <PlusIcon className="h-3.5 w-3.5" /> Add split
+              </button>
+              <p className={`text-xs ${totalPct > 100 ? 'text-red-text' : 'text-ink-secondary'}`}>
+                Running sum: {totalPct}%
+                {totalPct > 100 && ' — exceeds 100%'}
+                {totalPct > 0 && totalPct < 100 && ` — remaining ${(100 - totalPct).toFixed(1)}% is implied bad-debt/write-off`}
+              </p>
+            </div>
+          </Field>
+          <Field label="Calibration source">
+            <Select
+              value={fields.calibrationSource ?? 'manual'}
+              onChange={(v) => set({ calibrationSource: v as DriverFields['calibrationSource'] })}
+              options={[
+                { value: 'manual', label: 'Manual entry' },
+                { value: 'derived_from_history', label: 'Derived from history' },
+              ]}
+            />
+          </Field>
+          {fields.calibrationSource === 'derived_from_history' && (
+            <Field label="Refresh cadence">
+              <Select
+                value={fields.refreshCadence ?? 'Monthly'}
+                onChange={(v) => set({ refreshCadence: v as DriverFields['refreshCadence'] })}
+                options={[
+                  { value: 'Monthly', label: 'Monthly' },
+                  { value: 'Quarterly', label: 'Quarterly' },
+                  { value: 'Manual trigger', label: 'Manual trigger' },
+                ]}
+              />
+            </Field>
+          )}
+        </>
       )
     }
 

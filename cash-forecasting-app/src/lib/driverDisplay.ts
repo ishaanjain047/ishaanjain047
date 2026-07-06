@@ -25,11 +25,19 @@ export function currentValueDisplay(driver: Driver): string {
     case 'erp_trailing_stat':
     case 'erp_due_date_direct':
       return 'Series'
+    case 'recurring': {
+      const basis = f.payBasis ?? 'Weekly'
+      const freq = f.recurringFrequency && f.recurringFrequency > 1 ? ` ×${f.recurringFrequency}` : ''
+      return `${formatMoney(f.amount)} / ${basis}${freq}`
+    }
     case 'dso':
     case 'dpo':
       return `${f.avgDaysOutstanding ?? '—'} days`
-    case 'pay_terms_distribution':
-      return `${f.splits?.length ?? 0} splits`
+    case 'collection_curve': {
+      const rows = f.curveRows ?? []
+      const sum = rows.reduce((s, r) => s + (r.percentage || 0), 0)
+      return rows.length === 0 ? '—' : `${rows.length} pts, ${sum}%`
+    }
     case 'ml_suggested':
       return 'Series'
     case 'calibration_factor':
@@ -42,8 +50,5 @@ export function currentValueDisplay(driver: Driver): string {
 }
 
 export function netsuiteMappingDisplay(driver: Driver): string {
-  if (driver.type === 'erp_trailing_stat' || driver.type === 'erp_due_date_direct') {
-    return driver.fields.account || '— Manual only'
-  }
-  return '— Manual only'
+  return driver.netsuiteMapping?.account || '— Manual only'
 }

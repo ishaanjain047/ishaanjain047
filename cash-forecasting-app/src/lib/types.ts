@@ -4,27 +4,30 @@ export type DriverType =
   | 'plan_allocation'
   | 'erp_trailing_stat'
   | 'erp_due_date_direct'
+  | 'recurring'
   | 'dso'
   | 'dpo'
-  | 'pay_terms_distribution'
+  | 'collection_curve'
   | 'ml_suggested'
   | 'calibration_factor'
   | 'ratio'
 
 export type DriverFamily = 'manual' | 'erp' | 'statistical' | 'ml'
 
+// Order matches the 12-row catalog in the Drivers Module spec (Section 4).
 export const DRIVER_FAMILY: Record<DriverType, DriverFamily> = {
   manual_assumption: 'manual',
   manual_series: 'manual',
   plan_allocation: 'erp',
   erp_trailing_stat: 'erp',
   erp_due_date_direct: 'erp',
+  recurring: 'manual',
   dso: 'statistical',
   dpo: 'statistical',
-  pay_terms_distribution: 'statistical',
+  collection_curve: 'statistical',
+  ml_suggested: 'ml',
   calibration_factor: 'statistical',
   ratio: 'statistical',
-  ml_suggested: 'ml',
 }
 
 export const DRIVER_TYPE_LABEL: Record<DriverType, string> = {
@@ -33,17 +36,40 @@ export const DRIVER_TYPE_LABEL: Record<DriverType, string> = {
   plan_allocation: 'Plan Allocation',
   erp_trailing_stat: 'ERP Actual + Trailing Stat',
   erp_due_date_direct: 'ERP Actual — Due Date Direct',
+  recurring: 'Recurring',
   dso: 'DSO',
   dpo: 'DPO',
-  pay_terms_distribution: 'Pay-Terms Distribution',
+  collection_curve: 'Collection Curve',
   ml_suggested: 'ML-Suggested',
   calibration_factor: 'Calibration/Correction Factor',
   ratio: 'Ratio',
 }
 
-export interface PayTermSplit {
-  offsetDays: number
-  weightPct: number
+export type PayBasis = 'Monthly' | 'Weekly' | 'Quarterly' | 'Annual'
+export type CalibrationSource = 'manual' | 'derived_from_history'
+export type RefreshCadence = 'Monthly' | 'Quarterly' | 'Manual trigger'
+export type ApplicabilityWindow = 'forecasted_only' | 'all_periods'
+
+export interface CurveRow {
+  offsetPeriods: number
+  percentage: number
+}
+
+// Present (possibly null) on every driver, regardless of type — see Section 2/3 of the
+// Drivers Module spec. A real NetSuite transaction for a given period always takes hard
+// precedence over the driver's declared forecast method for that period.
+export interface NetsuiteMapping {
+  subsidiary: string | null
+  account: string | null
+  queryDescription: string | null
+}
+
+export function emptyNetsuiteMapping(): NetsuiteMapping {
+  return { subsidiary: null, account: null, queryDescription: null }
+}
+
+export function isNetsuiteMappingEmpty(m: NetsuiteMapping | null | undefined): boolean {
+  return !m || (!m.subsidiary && !m.account && !m.queryDescription)
 }
 
 export interface DriverFields {
@@ -57,25 +83,33 @@ export interface DriverFields {
   rawTotalAmount?: number
   spreadAcross?: number
   sourceNote?: string
-  // erp_trailing_stat / erp_due_date_direct
-  subsidiary?: string
-  account?: string
-  queryMethod?: string
+  // erp_trailing_stat / erp_due_date_direct (subsidiary/account/query live in
+  // the universal netsuiteMapping envelope, not here)
   actualsHorizonWeeks?: number
   fallbackMethod?: string
   dueDateFieldRef?: string
+  // recurring
+  payBasis?: PayBasis
+  startPeriod?: string
+  recurringFrequency?: number
+  numberOfOccurrences?: number
+  indefiniteOccurrences?: boolean
+  amount?: number
   // dso / dpo
   avgDaysOutstanding?: number
   balanceSource?: string
-  // pay_terms_distribution
-  splits?: PayTermSplit[]
+  // collection_curve
+  curveRows?: CurveRow[]
+  applicabilityWindow?: ApplicabilityWindow
+  calibrationSource?: CalibrationSource
+  refreshCadence?: RefreshCadence
   // ml_suggested
   modelSourceNote?: string
   predictedValuesByPeriod?: Record<string, number>
   // calibration_factor
   multiplier?: number
   appliedTo?: string
-  // ratio
+  // ratio / collection_curve source reference
   sourceRef?: string
   percentage?: number
 }
@@ -94,8 +128,10 @@ export interface Driver {
   name: string
   type: DriverType
   frequency: string
+  netsuiteMapping: NetsuiteMapping | null
   fields: DriverFields
   derivationLogic: string
+  lastEditReason: string
   history: HistoryEntry[]
   updatedAt: string
   updatedBy: string

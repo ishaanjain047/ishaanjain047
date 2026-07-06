@@ -15,6 +15,7 @@ import type {
   HistoryEntry,
   LineItem,
   ModelHistoryEntry,
+  NetsuiteMapping,
 } from './types'
 
 function nowIso() {
@@ -39,13 +40,20 @@ interface Store {
     name: string
     type: DriverType
     frequency: string
+    netsuiteMapping: NetsuiteMapping | null
     fields: DriverFields
     derivationLogic: string
     reason: string
   }) => Driver
   updateDriver: (
     id: string,
-    patch: { name?: string; frequency?: string; fields?: DriverFields; derivationLogic?: string },
+    patch: {
+      name?: string
+      frequency?: string
+      netsuiteMapping?: NetsuiteMapping | null
+      fields?: DriverFields
+      derivationLogic?: string
+    },
     reason: string,
   ) => void
   addModel: (input: { name: string; fiscalYear: string; description: string }) => CashFlowModel
@@ -77,6 +85,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       name: string
       type: DriverType
       frequency: string
+      netsuiteMapping: NetsuiteMapping | null
       fields: DriverFields
       derivationLogic: string
       reason: string
@@ -85,21 +94,24 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         .toLowerCase()
         .replace(/[^a-z0-9]+(.)/g, (_, c) => c.toUpperCase())
         .replace(/[^a-zA-Z0-9]/g, '') || `driver${drivers.length + 1}`
+      const reason = input.reason || 'Initial creation'
       const entry: HistoryEntry = {
         date: nowIso(),
         editor: CURRENT_USER,
         field: 'created',
         oldValue: '—',
         newValue: 'Driver created',
-        reason: input.reason || 'Initial creation',
+        reason,
       }
       const driver: Driver = {
         id,
         name: input.name,
         type: input.type,
         frequency: input.frequency,
+        netsuiteMapping: input.netsuiteMapping,
         fields: input.fields,
         derivationLogic: input.derivationLogic,
+        lastEditReason: reason,
         history: [entry],
         updatedAt: entry.date,
         updatedBy: CURRENT_USER,
@@ -110,7 +122,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
     function updateDriver(
       id: string,
-      patch: { name?: string; frequency?: string; fields?: DriverFields; derivationLogic?: string },
+      patch: {
+        name?: string
+        frequency?: string
+        netsuiteMapping?: NetsuiteMapping | null
+        fields?: DriverFields
+        derivationLogic?: string
+      },
       reason: string,
     ) {
       setDrivers((prev) =>
@@ -149,13 +167,32 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
               }
             })
           }
+          if (patch.netsuiteMapping !== undefined) {
+            const oldMapping = d.netsuiteMapping
+            ;(['subsidiary', 'account', 'queryDescription'] as const).forEach((key) => {
+              const oldVal = oldMapping?.[key]
+              const newVal = patch.netsuiteMapping?.[key]
+              if (fieldDisplay(oldVal) !== fieldDisplay(newVal)) {
+                newEntries.push({
+                  date,
+                  editor: CURRENT_USER,
+                  field: `netsuiteMapping.${key}`,
+                  oldValue: fieldDisplay(oldVal),
+                  newValue: fieldDisplay(newVal),
+                  reason,
+                })
+              }
+            })
+          }
           if (newEntries.length === 0) return d
           return {
             ...d,
             name: patch.name ?? d.name,
             frequency: patch.frequency ?? d.frequency,
             derivationLogic: patch.derivationLogic ?? d.derivationLogic,
+            netsuiteMapping: patch.netsuiteMapping !== undefined ? patch.netsuiteMapping : d.netsuiteMapping,
             fields: patch.fields ? { ...d.fields, ...patch.fields } : d.fields,
+            lastEditReason: reason,
             history: [...newEntries, ...d.history],
             updatedAt: date,
             updatedBy: CURRENT_USER,

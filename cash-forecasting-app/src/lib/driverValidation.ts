@@ -1,6 +1,6 @@
-import type { DriverFields, DriverType } from './types'
+import type { DriverFields, DriverType, NetsuiteMapping } from './types'
 
-export function validateDriverFields(type: DriverType, f: DriverFields): boolean {
+export function validateDriverFields(type: DriverType, f: DriverFields, netsuiteMapping?: NetsuiteMapping | null): boolean {
   switch (type) {
     case 'manual_assumption':
       return f.value !== undefined && !Number.isNaN(f.value)
@@ -9,14 +9,16 @@ export function validateDriverFields(type: DriverType, f: DriverFields): boolean
     case 'plan_allocation':
       return !!f.rawTotalAmount && !!f.spreadAcross
     case 'erp_trailing_stat':
-      return !!f.subsidiary && !!f.account
+      return !!netsuiteMapping?.subsidiary && !!netsuiteMapping?.account && f.actualsHorizonWeeks !== undefined
     case 'erp_due_date_direct':
-      return !!f.subsidiary && !!f.account
+      return !!netsuiteMapping?.subsidiary && !!netsuiteMapping?.account && !!f.dueDateFieldRef
+    case 'recurring':
+      return !!f.payBasis && !!f.startPeriod && f.amount !== undefined && !Number.isNaN(f.amount)
     case 'dso':
     case 'dpo':
       return f.avgDaysOutstanding !== undefined && !!f.balanceSource
-    case 'pay_terms_distribution':
-      return (f.splits?.length ?? 0) > 0
+    case 'collection_curve':
+      return !!f.sourceRef && (f.curveRows?.length ?? 0) > 0
     case 'ml_suggested':
       return !!f.modelSourceNote
     case 'calibration_factor':

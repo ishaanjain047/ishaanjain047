@@ -12,12 +12,14 @@ import {
   SegmentedControl,
   TextInput,
 } from '../components/ui'
-import { DerivationFields, DriverTypeFields, defaultFrequencyForType } from '../components/DriverTypeFields'
+import { DerivationFields, DriverTypeFields, NetSuiteMappingFields, defaultFrequencyForType } from '../components/DriverTypeFields'
+import { DriverPreviewChart } from '../components/DriverPreviewChart'
 import { Timeline, TimelineEntry } from '../components/Timeline'
 import { useStore } from '../lib/store'
-import type { Driver, DriverFamily, DriverFields, DriverType } from '../lib/types'
-import { DRIVER_FAMILY, DRIVER_TYPE_LABEL } from '../lib/types'
+import type { Driver, DriverFamily, DriverFields, DriverType, NetsuiteMapping } from '../lib/types'
+import { DRIVER_FAMILY, DRIVER_TYPE_LABEL, emptyNetsuiteMapping } from '../lib/types'
 import { FAMILY_COLORS, currentValueDisplay, familyOf, netsuiteMappingDisplay } from '../lib/driverDisplay'
+import { computeDriverPreview } from '../lib/driverEngine'
 import { validateDriverFields } from '../lib/driverValidation'
 import { formatDateTime, formatRelativeDate } from '../lib/format'
 
@@ -52,6 +54,7 @@ function NewDriverDrawer({ open, onClose }: { open: boolean; onClose: () => void
   const [name, setName] = useState('')
   const [type, setType] = useState<DriverType | ''>('')
   const [fields, setFields] = useState<DriverFields>({})
+  const [netsuiteMapping, setNetsuiteMapping] = useState<NetsuiteMapping>(emptyNetsuiteMapping())
   const [derivationLogic, setDerivationLogic] = useState('')
   const [reason, setReason] = useState('')
 
@@ -59,6 +62,7 @@ function NewDriverDrawer({ open, onClose }: { open: boolean; onClose: () => void
     setName('')
     setType('')
     setFields({})
+    setNetsuiteMapping(emptyNetsuiteMapping())
     setDerivationLogic('')
     setReason('')
   }
@@ -66,9 +70,14 @@ function NewDriverDrawer({ open, onClose }: { open: boolean; onClose: () => void
   function handleTypeChange(v: string) {
     setType(v as DriverType)
     setFields({})
+    if (v === 'collection_curve' && !derivationLogic.trim()) {
+      setDerivationLogic(
+        'Collection curve applying offset/percentage splits to a rolling window of the selected source reference. Any remainder under 100% is implied bad-debt/write-off.',
+      )
+    }
   }
 
-  const canSave = !!name.trim() && !!type && validateDriverFields(type as DriverType, fields)
+  const canSave = !!name.trim() && !!type && validateDriverFields(type as DriverType, fields, netsuiteMapping)
 
   function handleSave() {
     if (!canSave || !type) return
@@ -76,6 +85,7 @@ function NewDriverDrawer({ open, onClose }: { open: boolean; onClose: () => void
       name: name.trim(),
       type,
       frequency: defaultFrequencyForType(type, fields),
+      netsuiteMapping,
       fields,
       derivationLogic,
       reason,
@@ -114,6 +124,9 @@ function NewDriverDrawer({ open, onClose }: { open: boolean; onClose: () => void
             <DriverTypeFields type={type} fields={fields} onChange={setFields} drivers={drivers} lineItems={lineItems} />
           </div>
         )}
+        {type && (
+          <NetSuiteMappingFields mapping={netsuiteMapping} onChange={(patch) => setNetsuiteMapping((m) => ({ ...m, ...patch }))} />
+        )}
         <div className="space-y-5 border-t border-border pt-5">
           <DerivationFields
             derivationLogic={derivationLogic}
@@ -132,6 +145,7 @@ function EditDriverDrawer({ driver, onClose }: { driver: Driver | null; onClose:
   const [name, setName] = useState('')
   const [frequency, setFrequency] = useState('')
   const [fields, setFields] = useState<DriverFields>({})
+  const [netsuiteMapping, setNetsuiteMapping] = useState<NetsuiteMapping>(emptyNetsuiteMapping())
   const [derivationLogic, setDerivationLogic] = useState('')
   const [reason, setReason] = useState('')
   const [historyOpen, setHistoryOpen] = useState(true)
@@ -142,6 +156,7 @@ function EditDriverDrawer({ driver, onClose }: { driver: Driver | null; onClose:
     setName(driver.name)
     setFrequency(driver.frequency)
     setFields(driver.fields)
+    setNetsuiteMapping(driver.netsuiteMapping ?? emptyNetsuiteMapping())
     setDerivationLogic(driver.derivationLogic)
     setReason('')
   }
@@ -152,13 +167,19 @@ function EditDriverDrawer({ driver, onClose }: { driver: Driver | null; onClose:
     name !== driver.name ||
     frequency !== driver.frequency ||
     derivationLogic !== driver.derivationLogic ||
-    JSON.stringify(fields) !== JSON.stringify(driver.fields)
+    JSON.stringify(fields) !== JSON.stringify(driver.fields) ||
+    JSON.stringify(netsuiteMapping) !== JSON.stringify(driver.netsuiteMapping ?? emptyNetsuiteMapping())
 
   function handleSave() {
     if (!driver || !dirty || !reason.trim()) return
-    updateDriver(driver.id, { name, frequency, fields, derivationLogic }, reason.trim())
+    updateDriver(driver.id, { name, frequency, fields, netsuiteMapping, derivationLogic }, reason.trim())
     onClose()
   }
+
+  const driversById = Object.fromEntries(drivers.map((d) => [d.id, d]))
+  const previewDriver: Driver = { ...driver, name, type: driver.type, fields, netsuiteMapping }
+  driversById[driver.id] = previewDriver
+  const preview = computeDriverPreview(previewDriver, driversById)
 
   return (
     <Drawer
@@ -191,6 +212,7 @@ function EditDriverDrawer({ driver, onClose }: { driver: Driver | null; onClose:
             excludeDriverId={driver.id}
           />
         </div>
+        <NetSuiteMappingFields mapping={netsuiteMapping} onChange={(patch) => setNetsuiteMapping((m) => ({ ...m, ...patch }))} />
         <div className="border-t border-border pt-5">
           <Field label="Derivation logic">
             <textarea
@@ -207,6 +229,10 @@ function EditDriverDrawer({ driver, onClose }: { driver: Driver | null; onClose:
         <PrimaryButton onClick={handleSave} disabled={!dirty || !reason.trim()} className="w-full justify-center">
           Save
         </PrimaryButton>
+
+        <div className="border-t border-border pt-5">
+          <DriverPreviewChart preview={preview} />
+        </div>
 
         <div className="border-t border-border pt-5">
           <button
