@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { Drawer, Field, PrimaryButton, SecondaryButton, Select, TextInput } from './ui'
 import type { Driver, LineItem, LineItemCategory, LineItemKind, Period } from '../lib/types'
 import { checkFormula, substituteNames } from '../lib/formula'
@@ -39,6 +39,7 @@ function FormulaEditor({
 }) {
   const ref = useRef<HTMLTextAreaElement>(null)
   const cursorRef = useRef(formula.length)
+  const [chipFilter, setChipFilter] = useState('')
 
   function insertChip(id: string) {
     const pos = cursorRef.current ?? formula.length
@@ -53,6 +54,11 @@ function FormulaEditor({
   }
 
   const result = checkFormula(formula, knownIds)
+  const filteredChips = useMemo(() => {
+    const q = chipFilter.trim().toLowerCase()
+    if (!q) return chips
+    return chips.filter((c) => c.label.toLowerCase().includes(q) || c.id.toLowerCase().includes(q))
+  }, [chips, chipFilter])
 
   return (
     <div className="space-y-2">
@@ -67,8 +73,22 @@ function FormulaEditor({
         className="w-full rounded-input border border-border-input bg-white px-3 py-2 font-mono text-sm focus:border-ink-primary focus:outline-none"
         placeholder="e.g. -(vendorTier1History * apTier1Calibration)"
       />
-      <div className="flex flex-wrap gap-1.5">
-        {chips.map((c) => (
+      <div className="relative">
+        <svg viewBox="0 0 20 20" fill="none" className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-muted">
+          <circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" strokeWidth="1.4" />
+          <path d="M16 16l-3.5-3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+        </svg>
+        <input
+          type="text"
+          value={chipFilter}
+          onChange={(e) => setChipFilter(e.target.value)}
+          placeholder="Search drivers and line items…"
+          className="w-full rounded-input border border-border-input bg-white py-1.5 pl-8 pr-3 text-xs text-ink-primary placeholder:text-ink-muted focus:border-ink-primary focus:outline-none"
+        />
+      </div>
+      <div className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto rounded-input border border-border bg-page/40 p-2">
+        {filteredChips.length === 0 && <p className="px-1 py-1 text-xs text-ink-muted">No match for "{chipFilter}"</p>}
+        {filteredChips.map((c) => (
           <button
             key={c.id}
             type="button"

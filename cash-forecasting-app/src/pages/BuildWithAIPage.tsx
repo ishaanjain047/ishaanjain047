@@ -1,37 +1,63 @@
 import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { DerivationFields, DriverTypeFields, NetSuiteMappingFields, defaultFrequencyForType } from '../components/DriverTypeFields'
 import { LineItemDrawer } from '../components/LineItemDrawer'
 import { RowLine, RowTableBody, RowTableHeader, SectionBanner } from '../components/RowTable'
-import { Card, Field, LabelCaps, PrimaryButton, SecondaryButton, Select, SegmentedControl, TextArea, TextInput } from '../components/ui'
+import {
+  Card,
+  Field,
+  LabelCaps,
+  PrimaryButton,
+  SecondaryButton,
+  Select,
+  SegmentedControl,
+  TextArea,
+  TextInput,
+} from '../components/ui'
 import { periods as allPeriods, OPENING_BALANCE_START } from '../data/seed'
 import { formatMoney } from '../lib/format'
 import { inferCategory, parsePercentOfPrompt } from '../lib/nlpDriverProposal'
 import { buildColumns, type ViewMode } from '../lib/periodAggregate'
 import { aggregateForColumn, aggregateSnapshotForColumn, computeBalanceChain, computeRowValues, type CellValue } from '../lib/rowEngine'
 import { useStore } from '../lib/store'
-import type { LineItemCategory, LineItemKind, RowDef } from '../lib/types'
+import { emptyNetsuiteMapping } from '../lib/types'
+import type { DriverFields, LineItemCategory, LineItemKind, NetsuiteMapping, RowDef } from '../lib/types'
+import { validateDriverFields } from '../lib/driverValidation'
 
 type Phase = 'prompt' | 'setup' | 'canvas'
-type ProposalStep = 'definition' | 'values' | 'formula'
+type ProposalStep = 'definition' | 'formula'
+type BaseMode = 'new' | 'existing'
+
+const PENDING_BASE_ID = '__pending_base__'
 
 interface ProposalState {
   step: ProposalStep
   lineItemName: string
   category: LineItemCategory
-  baseDriverName: string
-  curveDriverName: string
   percentageLow: number
   percentageHigh: number
+
+  baseMode: BaseMode
+  baseDriverName: string
+  baseExistingId: string
   baseValues: Record<string, number>
+  baseNetsuiteMapping: NetsuiteMapping
+  baseDerivationLogic: string
+  baseReason: string
+
+  curveDriverName: string
+  curveFields: DriverFields
+  curveNetsuiteMapping: NetsuiteMapping
+  curveDerivationLogic: string
+  curveReason: string
 }
 
 interface ChatMessage {
   id: string
   role: 'user' | 'agent'
   text: string
+  action?: { label: string; onClick: () => void }
 }
-
-const PERIOD_KEYS = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6']
 
 function uid() {
   return Math.random().toString(36).slice(2)
@@ -46,22 +72,63 @@ function Cell({ value, column }: { value: CellValue; column: ReturnType<typeof b
   )
 }
 
+function ThinkingBubble() {
+  return (
+    <div className="flex justify-start">
+      <div className="flex items-center gap-1 rounded-card bg-page px-4 py-3">
+        {[0, 1, 2].map((i) => (
+          <span
+            key={i}
+            className="h-1.5 w-1.5 animate-bounce rounded-full bg-ink-muted"
+            style={{ animationDelay: `${i * 0.15}s` }}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function ProposalCard({
   proposal,
   onChange,
+  drivers,
+  lineItems,
   onConfirmDefinition,
-  onConfirmValues,
   onConfirmFormula,
   onCancel,
 }: {
   proposal: ProposalState
   onChange: (patch: Partial<ProposalState>) => void
+  drivers: ReturnType<typeof useStore>['drivers']
+  lineItems: ReturnType<typeof useStore>['lineItems']
   onConfirmDefinition: () => void
-  onConfirmValues: () => void
   onConfirmFormula: () => void
   onCancel: () => void
 }) {
-  const steps: ProposalStep[] = ['definition', 'values', 'formula']
+  const steps: ProposalStep[] = ['definition', 'formula']
+
+  const virtualBaseDriver = {
+    id: PENDING_BASE_ID,
+    name: proposal.baseDriverName || 'New base driver',
+    type: 'manual_series' as const,
+    frequency: 'Weekly',
+    netsuiteMapping: null,
+    fields: {},
+    derivationLogic: '',
+    lastEditReason: '',
+    history: [],
+    updatedAt: '',
+    updatedBy: '',
+  }
+  const driversForCurve = proposal.baseMode === 'new' ? [virtualBaseDriver, ...drivers] : drivers
+
+  const baseValid =
+    proposal.baseMode === 'existing'
+      ? !!proposal.baseExistingId
+      : !!proposal.baseDriverName.trim() && validateDriverFields('manual_series', { valuesByPeriod: proposal.baseValues })
+  const curveValid = !!proposal.curveDriverName.trim() && validateDriverFields('collection_curve', proposal.curveFields)
+  const definitionValid = baseValid && curveValid
+
   return (
     <Card className="mb-4 border-2 border-ink-primary/10 p-5">
       <div className="mb-4 flex items-center justify-between">
@@ -75,9 +142,7 @@ function ProposalCard({
               >
                 {i + 1}
               </span>
-              <span className="text-xs text-ink-secondary">
-                {s === 'definition' ? 'Driver definition' : s === 'values' ? 'Driver values' : 'Line-item formula'}
-              </span>
+              <span className="text-xs text-ink-secondary">{s === 'definition' ? 'Driver definition' : 'Line-item formula'}</span>
               {i < steps.length - 1 && <span className="mx-1 text-ink-muted">→</span>}
             </div>
           ))}
@@ -88,74 +153,111 @@ function ProposalCard({
       </div>
 
       {proposal.step === 'definition' && (
-        <div className="space-y-4">
+        <div className="space-y-5">
           <p className="text-sm text-ink-secondary">
             This looks like a percentage-of-another-value pattern, so I'm proposing two drivers rather than one: a base series and a
-            Collection Curve on top of it.
+            Collection Curve on top of it. Both use the same forms as the Driver Registry.
           </p>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="rounded-input border border-border-input bg-page/50 p-3">
-              <LabelCaps className="mb-2">Driver 1 — Base value</LabelCaps>
-              <Field label="Name">
-                <TextInput value={proposal.baseDriverName} onChange={(e) => onChange({ baseDriverName: e.target.value })} />
-              </Field>
-              <p className="mt-2 text-xs text-ink-secondary">Type: Manual Series · Frequency: Weekly</p>
-            </div>
-            <div className="rounded-input border border-border-input bg-page/50 p-3">
-              <LabelCaps className="mb-2">Driver 2 — Collection Curve</LabelCaps>
-              <Field label="Name">
-                <TextInput value={proposal.curveDriverName} onChange={(e) => onChange({ curveDriverName: e.target.value })} />
-              </Field>
-              <p className="mt-2 text-xs text-ink-secondary">Source reference: {proposal.baseDriverName || 'Base value'}</p>
-              <div className="mt-2 flex items-center gap-2 text-xs text-ink-secondary">
-                <span>Same-week percentage:</span>
-                <input
-                  type="number"
-                  step="any"
-                  value={(proposal.percentageLow + proposal.percentageHigh) / 2}
-                  onChange={(e) => {
-                    const v = Number(e.target.value)
-                    onChange({ percentageLow: v, percentageHigh: v })
-                  }}
-                  className="w-16 rounded-input border border-border-input bg-white px-2 py-1 text-center tabular-nums"
-                />
-                <span>%</span>
-              </div>
-              {proposal.percentageLow !== proposal.percentageHigh && (
-                <p className="mt-1 text-xs text-ink-muted">Stated range: {proposal.percentageLow}–{proposal.percentageHigh}%</p>
-              )}
-            </div>
-          </div>
+
           <Field label="Line item name">
             <TextInput value={proposal.lineItemName} onChange={(e) => onChange({ lineItemName: e.target.value })} />
           </Field>
-          <PrimaryButton onClick={onConfirmDefinition} className="w-full justify-center">
-            Confirm driver definitions
-          </PrimaryButton>
-        </div>
-      )}
 
-      {proposal.step === 'values' && (
-        <div className="space-y-4">
-          <p className="text-sm text-ink-secondary">
-            Now the actual weekly values for <span className="font-medium text-ink-primary">{proposal.baseDriverName}</span> — enter
-            them directly, or these default to zero until you do.
-          </p>
-          <div className="grid grid-cols-6 gap-2">
-            {PERIOD_KEYS.map((key, i) => (
-              <div key={key}>
-                <div className="mb-1 text-center text-[10px] text-ink-muted">W{i + 1}</div>
-                <input
-                  type="number"
-                  value={proposal.baseValues[key] ?? ''}
-                  onChange={(e) => onChange({ baseValues: { ...proposal.baseValues, [key]: Number(e.target.value) } })}
-                  className="w-full rounded-input border border-border-input bg-white px-2 py-1.5 text-center text-xs tabular-nums focus:border-ink-primary focus:outline-none"
+          <div className="rounded-card border border-border-input p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <LabelCaps>Driver 1 — Base value</LabelCaps>
+              <SegmentedControl
+                options={[
+                  { value: 'new', label: 'Create new' },
+                  { value: 'existing', label: 'Map to existing' },
+                ]}
+                value={proposal.baseMode}
+                onChange={(v) => onChange({ baseMode: v as BaseMode })}
+              />
+            </div>
+
+            {proposal.baseMode === 'existing' ? (
+              <Field label="Existing driver" hint="Already has values — no need to re-enter them">
+                <Select
+                  value={proposal.baseExistingId}
+                  onChange={(v) => onChange({ baseExistingId: v, curveFields: { ...proposal.curveFields, sourceRef: v } })}
+                  options={[
+                    { value: '', label: 'Select a driver…' },
+                    ...drivers.map((d) => ({ value: d.id, label: `${d.name} (${d.type.replace(/_/g, ' ')})` })),
+                  ]}
+                />
+              </Field>
+            ) : (
+              <div className="space-y-4">
+                <Field label="Name">
+                  <TextInput
+                    value={proposal.baseDriverName}
+                    onChange={(e) => {
+                      const name = e.target.value
+                      const shouldSync = proposal.curveFields.sourceRef === PENDING_BASE_ID || !proposal.curveFields.sourceRef
+                      onChange({
+                        baseDriverName: name,
+                        curveFields: shouldSync ? { ...proposal.curveFields, sourceRef: PENDING_BASE_ID } : proposal.curveFields,
+                      })
+                    }}
+                  />
+                </Field>
+                <p className="text-xs text-ink-secondary">Type: Manual Series</p>
+                <DriverTypeFields
+                  type="manual_series"
+                  fields={{ valuesByPeriod: proposal.baseValues }}
+                  onChange={(f) => onChange({ baseValues: f.valuesByPeriod ?? {} })}
+                  drivers={drivers}
+                  lineItems={lineItems}
+                />
+                <NetSuiteMappingFields
+                  mapping={proposal.baseNetsuiteMapping}
+                  onChange={(patch) => onChange({ baseNetsuiteMapping: { ...proposal.baseNetsuiteMapping, ...patch } })}
+                />
+                <DerivationFields
+                  derivationLogic={proposal.baseDerivationLogic}
+                  onDerivationChange={(v) => onChange({ baseDerivationLogic: v })}
+                  reason={proposal.baseReason}
+                  onReasonChange={(v) => onChange({ baseReason: v })}
+                  reasonLabel="Reason for creating this driver"
                 />
               </div>
-            ))}
+            )}
           </div>
-          <PrimaryButton onClick={onConfirmValues} className="w-full justify-center">
-            Confirm values
+
+          <div className="rounded-card border border-border-input p-4">
+            <LabelCaps className="mb-3">Driver 2 — Collection Curve</LabelCaps>
+            <div className="space-y-4">
+              <Field label="Name">
+                <TextInput value={proposal.curveDriverName} onChange={(e) => onChange({ curveDriverName: e.target.value })} />
+              </Field>
+              <p className="text-xs text-ink-secondary">
+                Stated range from the prompt: {proposal.percentageLow}–{proposal.percentageHigh}% — seeded as the first schedule row
+                below; add more rows for later-week collections.
+              </p>
+              <DriverTypeFields
+                type="collection_curve"
+                fields={proposal.curveFields}
+                onChange={(f) => onChange({ curveFields: f })}
+                drivers={driversForCurve}
+                lineItems={lineItems}
+              />
+              <NetSuiteMappingFields
+                mapping={proposal.curveNetsuiteMapping}
+                onChange={(patch) => onChange({ curveNetsuiteMapping: { ...proposal.curveNetsuiteMapping, ...patch } })}
+              />
+              <DerivationFields
+                derivationLogic={proposal.curveDerivationLogic}
+                onDerivationChange={(v) => onChange({ curveDerivationLogic: v })}
+                reason={proposal.curveReason}
+                onReasonChange={(v) => onChange({ curveReason: v })}
+                reasonLabel="Reason for creating this driver"
+              />
+            </div>
+          </div>
+
+          <PrimaryButton onClick={onConfirmDefinition} disabled={!definitionValid} className="w-full justify-center">
+            Confirm driver definitions
           </PrimaryButton>
         </div>
       )}
@@ -184,6 +286,8 @@ export default function BuildWithAIPage() {
   const { addModel, addDriver, addLineItem, updateLineItem, getModel, drivers, lineItems } = useStore()
 
   const [phase, setPhase] = useState<Phase>('prompt')
+  const [canvasOpen, setCanvasOpen] = useState(false)
+  const [thinking, setThinking] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: uid(),
@@ -206,9 +310,18 @@ export default function BuildWithAIPage() {
   const [setupStartMonth, setSetupStartMonth] = useState('May')
   const [fileName, setFileName] = useState<string | null>(null)
 
-  function pushMessage(role: 'user' | 'agent', text: string) {
-    setMessages((prev) => [...prev, { id: uid(), role, text }])
+  function pushMessage(role: 'user' | 'agent', text: string, action?: ChatMessage['action']) {
+    setMessages((prev) => [...prev, { id: uid(), role, text, action }])
     requestAnimationFrame(() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }))
+  }
+
+  function thinkThen(fn: () => void, delay = 900) {
+    setThinking(true)
+    requestAnimationFrame(() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }))
+    setTimeout(() => {
+      setThinking(false)
+      fn()
+    }, delay)
   }
 
   function handleSend() {
@@ -218,87 +331,112 @@ export default function BuildWithAIPage() {
     setInput('')
 
     if (phase === 'prompt') {
-      setPhase('setup')
-      pushMessage('agent', "Sure — let's set up the model. A few details first, in the card below.")
+      thinkThen(() => {
+        setPhase('setup')
+        pushMessage('agent', "Sure — let's set up the model. A few details first, in the card below.")
+      })
       return
     }
 
     if (phase === 'canvas') {
       if (proposal) {
-        pushMessage('agent', 'One proposal is already in progress below — confirm or cancel it first.')
+        pushMessage('agent', 'One proposal is already in progress in the canvas — confirm or cancel it first.')
         return
       }
-      const parsed = parsePercentOfPrompt(text)
-      if (parsed) {
-        pushMessage(
-          'agent',
-          `That's a percentage of another value applied over time, so I'm defaulting to a Collection Curve rather than asking you to pick a driver type. Review the proposal in the canvas.`,
-        )
-        setProposal({
-          step: 'definition',
-          lineItemName: parsed.lineItemName,
-          category: inferCategory(text),
-          baseDriverName: parsed.baseDriverName,
-          curveDriverName: `${parsed.lineItemName} Collection Curve`,
-          percentageLow: parsed.percentageLow,
-          percentageHigh: parsed.percentageHigh,
-          baseValues: {},
-        })
-      } else {
-        pushMessage(
-          'agent',
-          'I can add a line item or driver from a description like "collections will be 3–5% of billings each week." Try phrasing it that way, or edit any row directly in the canvas.',
-        )
-      }
+      thinkThen(() => {
+        const parsed = parsePercentOfPrompt(text)
+        if (parsed) {
+          pushMessage(
+            'agent',
+            `That's a percentage of another value applied over time, so I'm defaulting to a Collection Curve rather than asking you to pick a driver type. Review the proposal in the canvas.`,
+          )
+          const midpoint = (parsed.percentageLow + parsed.percentageHigh) / 2
+          setProposal({
+            step: 'definition',
+            lineItemName: parsed.lineItemName,
+            category: inferCategory(text),
+            percentageLow: parsed.percentageLow,
+            percentageHigh: parsed.percentageHigh,
+            baseMode: 'new',
+            baseDriverName: parsed.baseDriverName,
+            baseExistingId: '',
+            baseValues: {},
+            baseNetsuiteMapping: emptyNetsuiteMapping(),
+            baseDerivationLogic: `Base value entered directly while building "${parsed.lineItemName}" via Build with AI.`,
+            baseReason: 'Created via Build with AI from natural-language prompt',
+            curveDriverName: `${parsed.lineItemName} Collection Curve`,
+            curveFields: {
+              sourceRef: PENDING_BASE_ID,
+              applicabilityWindow: 'forecasted_only',
+              curveRows: [{ offsetPeriods: 0, percentage: Math.round(midpoint * 10) / 10 }],
+              calibrationSource: 'manual',
+            },
+            curveNetsuiteMapping: emptyNetsuiteMapping(),
+            curveDerivationLogic: `Proposed from the prompt's stated ${parsed.percentageLow}–${parsed.percentageHigh}% range, applied to ${parsed.baseDriverName}.`,
+            curveReason: 'Created via Build with AI from natural-language prompt',
+          })
+          setCanvasOpen(true)
+        } else {
+          pushMessage(
+            'agent',
+            'I can add a line item or driver from a description like "collections will be 3–5% of billings each week." Try phrasing it that way, or edit any row directly in the canvas.',
+          )
+        }
+      })
     }
   }
 
   function handleSetupSubmit() {
     if (!setupName.trim()) return
-    const model = addModel({ name: setupName.trim(), fiscalYear: setupFiscalYear, description: setupDescription })
-    setModelId(model.id)
-    setPhase('canvas')
-    pushMessage(
-      'agent',
-      `Your model canvas is ready — every line item from the ChargePoint structure is there, showing em-dash until a driver is wired. Click any row's pencil to edit it directly, or describe a new one here.`,
-    )
+    thinkThen(() => {
+      const model = addModel({ name: setupName.trim(), fiscalYear: setupFiscalYear, description: setupDescription })
+      setModelId(model.id)
+      setPhase('canvas')
+      setCanvasOpen(true)
+      pushMessage(
+        'agent',
+        `Your model canvas is ready — every line item from the ChargePoint structure is there, showing em-dash until a driver is wired. Click any row's pencil to edit it directly, or describe a new one here.`,
+        { label: 'Open Model', onClick: () => setCanvasOpen(true) },
+      )
+    }, 1200)
   }
 
   function handleConfirmDefinition() {
-    if (!proposal) return
-    setProposal({ ...proposal, step: 'values' })
-  }
-
-  function handleConfirmValues() {
     if (!proposal) return
     setProposal({ ...proposal, step: 'formula' })
   }
 
   function handleConfirmFormula() {
     if (!proposal || !modelId) return
-    const base = addDriver({
-      name: proposal.baseDriverName,
-      type: 'manual_series',
-      frequency: 'Weekly',
-      netsuiteMapping: null,
-      fields: { valuesByPeriod: proposal.baseValues },
-      derivationLogic: `Base value entered directly while building "${proposal.lineItemName}" via Build with AI.`,
-      reason: 'Created via Build with AI from natural-language prompt',
-    })
+
+    let baseId = proposal.baseExistingId
+    if (proposal.baseMode === 'new') {
+      const base = addDriver({
+        name: proposal.baseDriverName,
+        type: 'manual_series',
+        frequency: 'Weekly',
+        netsuiteMapping: proposal.baseNetsuiteMapping,
+        fields: { valuesByPeriod: proposal.baseValues },
+        derivationLogic: proposal.baseDerivationLogic,
+        reason: proposal.baseReason || 'Created via Build with AI',
+      })
+      baseId = base.id
+    }
+
+    const resolvedCurveFields: DriverFields = {
+      ...proposal.curveFields,
+      sourceRef: proposal.curveFields.sourceRef === PENDING_BASE_ID ? baseId : proposal.curveFields.sourceRef,
+    }
     const curve = addDriver({
       name: proposal.curveDriverName,
       type: 'collection_curve',
-      frequency: 'Weekly',
-      netsuiteMapping: null,
-      fields: {
-        sourceRef: base.id,
-        applicabilityWindow: 'forecasted_only',
-        curveRows: [{ offsetPeriods: 0, percentage: (proposal.percentageLow + proposal.percentageHigh) / 2 }],
-        calibrationSource: 'manual',
-      },
-      derivationLogic: `Proposed from the prompt's stated ${proposal.percentageLow}–${proposal.percentageHigh}% range, applied to ${proposal.baseDriverName}.`,
-      reason: 'Created via Build with AI from natural-language prompt',
+      frequency: defaultFrequencyForType('collection_curve', resolvedCurveFields),
+      netsuiteMapping: proposal.curveNetsuiteMapping,
+      fields: resolvedCurveFields,
+      derivationLogic: proposal.curveDerivationLogic,
+      reason: proposal.curveReason || 'Created via Build with AI',
     })
+
     addLineItem(modelId, proposal.category, {
       name: proposal.lineItemName,
       forecastMode: 'formula',
@@ -309,6 +447,7 @@ export default function BuildWithAIPage() {
       forecast: {},
       directValues: {},
     })
+
     pushMessage(
       'agent',
       `Added "${proposal.lineItemName}" to the canvas, referencing ${proposal.curveDriverName} — you can inspect it, or any other line item, any time.`,
@@ -360,9 +499,11 @@ export default function BuildWithAIPage() {
     setEditingId(null)
   }
 
+  const showCanvas = phase === 'canvas' && !!model && canvasOpen
+
   return (
     <div className="flex h-full">
-      <div className="flex w-[420px] flex-shrink-0 flex-col border-r border-border bg-card">
+      <div className={`flex flex-shrink-0 flex-col border-r border-border bg-card ${showCanvas ? 'w-[420px]' : 'flex-1'}`}>
         <div className="flex items-center gap-3 border-b border-border px-5 py-4">
           <SecondaryButton onClick={() => navigate('/models')}>← Back</SecondaryButton>
           <h1 className="font-serif text-base text-ink-primary">Build with AI</h1>
@@ -370,15 +511,26 @@ export default function BuildWithAIPage() {
         <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
           {messages.map((m) => (
             <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div
-                className={`max-w-[85%] rounded-card px-3.5 py-2.5 text-sm ${
-                  m.role === 'user' ? 'bg-btn-primary-bg text-white' : 'bg-page text-ink-primary'
-                }`}
-              >
-                {m.text}
+              <div className={`max-w-[85%] ${m.role === 'user' ? '' : 'space-y-2'}`}>
+                <div
+                  className={`rounded-card px-3.5 py-2.5 text-sm ${
+                    m.role === 'user' ? 'bg-btn-primary-bg text-white' : 'bg-page text-ink-primary'
+                  }`}
+                >
+                  {m.text}
+                </div>
+                {m.action && (
+                  <button
+                    onClick={m.action.onClick}
+                    className="rounded-lg border border-btn-secondary-border bg-white px-3 py-1.5 text-xs font-medium text-ink-primary hover:bg-page"
+                  >
+                    {m.action.label}
+                  </button>
+                )}
               </div>
             </div>
           ))}
+          {thinking && <ThinkingBubble />}
 
           {phase === 'setup' && (
             <Card className="space-y-3 p-4">
@@ -439,93 +591,111 @@ export default function BuildWithAIPage() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
-        {phase !== 'canvas' || !model ? (
-          <div className="flex h-full items-center justify-center text-sm text-ink-muted">
-            The canvas opens here once the model is set up.
-          </div>
-        ) : (
+      {showCanvas && (
+        <div className="flex-1 overflow-y-auto">
           <div>
             <div className="flex items-center justify-between border-b border-border bg-page px-6 py-4">
               <div>
-                <h2 className="font-serif text-lg text-ink-primary">{model.name}</h2>
-                <p className="text-xs text-ink-muted">{model.fiscalYear}</p>
+                <h2 className="font-serif text-lg text-ink-primary">{model!.name}</h2>
+                <p className="text-xs text-ink-muted">{model!.fiscalYear}</p>
               </div>
-              <SegmentedControl
-                options={[
-                  { value: 'week', label: 'Week' },
-                  { value: 'month', label: 'Month' },
-                ]}
-                value={view}
-                onChange={setView}
-              />
-            </div>
-
-            <div className="px-6 pt-4">{proposal && (
-              <ProposalCard
-                proposal={proposal}
-                onChange={(patch) => setProposal((p) => (p ? { ...p, ...patch } : p))}
-                onConfirmDefinition={handleConfirmDefinition}
-                onConfirmValues={handleConfirmValues}
-                onConfirmFormula={handleConfirmFormula}
-                onCancel={() => setProposal(null)}
-              />
-            )}</div>
-
-            <div className="overflow-x-auto">
-              <div className="min-w-max">
-                <RowTableHeader columns={columns} />
-                <RowLine
-                  label="Beginning cash balance"
-                  columns={columns}
-                  bold
-                  tint
-                  renderCell={(c) => <Cell value={aggregateSnapshotForColumn(balanceChain.beginning, c, 'first')} column={c} />}
-                />
-                <SectionBanner label="RECEIPTS" bg="#F0F6F2" text="#376A42" columns={columns} />
-                <RowTableBody
-                  rowLayout={receipts.before}
-                  columns={columns}
-                  collapsedGroupIds={collapsed}
-                  onToggleGroup={toggle}
-                  renderCell={renderCell}
-                  onEditLeaf={(row) => setEditingId(row.id)}
-                />
-                <RowTableBody
-                  rowLayout={receipts.totals}
-                  columns={columns}
-                  collapsedGroupIds={collapsed}
-                  onToggleGroup={toggle}
-                  renderCell={renderCell}
-                />
-                <SectionBanner label="Disbursements" bg="#FBF1EF" text="#B14434" columns={columns} />
-                <RowTableBody
-                  rowLayout={disbursements.before}
-                  columns={columns}
-                  collapsedGroupIds={collapsed}
-                  onToggleGroup={toggle}
-                  renderCell={renderCell}
-                  onEditLeaf={(row) => setEditingId(row.id)}
-                />
-                <RowTableBody
-                  rowLayout={disbursements.totals}
-                  columns={columns}
-                  collapsedGroupIds={collapsed}
-                  onToggleGroup={toggle}
-                  renderCell={renderCell}
-                />
-                <RowLine
-                  label="Ending unrestricted cash"
-                  columns={columns}
-                  bold
-                  tint
-                  renderCell={(c) => <Cell value={aggregateSnapshotForColumn(balanceChain.ending, c, 'last')} column={c} />}
-                />
+              <div className="flex items-center gap-3">
+                {!proposal && (
+                  <SegmentedControl
+                    options={[
+                      { value: 'week', label: 'Week' },
+                      { value: 'month', label: 'Month' },
+                    ]}
+                    value={view}
+                    onChange={setView}
+                  />
+                )}
+                <button
+                  onClick={() => setCanvasOpen(false)}
+                  className="flex h-8 w-8 items-center justify-center rounded-full text-ink-secondary transition hover:bg-card"
+                  aria-label="Close canvas"
+                >
+                  ✕
+                </button>
               </div>
             </div>
+
+            {proposal ? (
+              // Focus mode: while a driver/line-item proposal is being confirmed, the
+              // worksheet table stays hidden so the form is the only thing on screen.
+              <div className="px-6 pt-4">
+                <ProposalCard
+                  proposal={proposal}
+                  onChange={(patch) => setProposal((p) => (p ? { ...p, ...patch } : p))}
+                  drivers={drivers}
+                  lineItems={lineItems}
+                  onConfirmDefinition={handleConfirmDefinition}
+                  onConfirmFormula={handleConfirmFormula}
+                  onCancel={() => setProposal(null)}
+                />
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <div className="min-w-max">
+                  <RowTableHeader columns={columns} />
+                  <RowLine
+                    label="Beginning cash balance"
+                    columns={columns}
+                    bold
+                    tint
+                    renderCell={(c) => <Cell value={aggregateSnapshotForColumn(balanceChain.beginning, c, 'first')} column={c} />}
+                  />
+                  <SectionBanner label="RECEIPTS" bg="#F0F6F2" text="#376A42" columns={columns} />
+                  <RowTableBody
+                    rowLayout={receipts.before}
+                    columns={columns}
+                    collapsedGroupIds={collapsed}
+                    onToggleGroup={toggle}
+                    renderCell={renderCell}
+                    onEditLeaf={(row) => setEditingId(row.id)}
+                  />
+                  <RowTableBody
+                    rowLayout={receipts.totals}
+                    columns={columns}
+                    collapsedGroupIds={collapsed}
+                    onToggleGroup={toggle}
+                    renderCell={renderCell}
+                  />
+                  <SectionBanner label="Disbursements" bg="#FBF1EF" text="#B14434" columns={columns} />
+                  <RowTableBody
+                    rowLayout={disbursements.before}
+                    columns={columns}
+                    collapsedGroupIds={collapsed}
+                    onToggleGroup={toggle}
+                    renderCell={renderCell}
+                    onEditLeaf={(row) => setEditingId(row.id)}
+                  />
+                  <RowTableBody
+                    rowLayout={disbursements.totals}
+                    columns={columns}
+                    collapsedGroupIds={collapsed}
+                    onToggleGroup={toggle}
+                    renderCell={renderCell}
+                  />
+                  <RowLine
+                    label="Ending unrestricted cash"
+                    columns={columns}
+                    bold
+                    tint
+                    renderCell={(c) => <Cell value={aggregateSnapshotForColumn(balanceChain.ending, c, 'last')} column={c} />}
+                  />
+                </div>
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {!showCanvas && phase === 'canvas' && model && (
+        <div className="flex flex-1 items-center justify-center">
+          <SecondaryButton onClick={() => setCanvasOpen(true)}>Open Model</SecondaryButton>
+        </div>
+      )}
 
       <LineItemDrawer
         open={!!editingId}
