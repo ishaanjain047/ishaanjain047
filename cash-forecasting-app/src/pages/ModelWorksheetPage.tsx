@@ -1,32 +1,23 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { LineItemDrawer } from '../components/LineItemDrawer'
+import { RowLine, RowTableBody, RowTableHeader, SectionBanner } from '../components/RowTable'
 import { Timeline, TimelineEntry } from '../components/Timeline'
-import {
-  LabelCaps,
-  PencilIcon,
-  PlusIcon,
-  PrimaryButton,
-  SecondaryButton,
-  SegmentedControl,
-  TrashIcon,
-} from '../components/ui'
-import { periods as allPeriods } from '../data/seed'
+import { PlusIcon, PrimaryButton, SecondaryButton, SegmentedControl } from '../components/ui'
+import { periods as allPeriods, OPENING_BALANCE_START } from '../data/seed'
 import { formatDateTime, formatMoney } from '../lib/format'
-import { buildColumns, sumByColumn, type ViewMode } from '../lib/periodAggregate'
+import { buildColumns, type DisplayColumn, type ViewMode } from '../lib/periodAggregate'
+import { aggregateForColumn, aggregateSnapshotForColumn, computeBalanceChain, computeRowValues, type CellValue } from '../lib/rowEngine'
 import { useStore } from '../lib/store'
-import type { LineItem, LineItemCategory, LineItemKind } from '../lib/types'
+import type { LineItemCategory, LineItemKind, RowDef } from '../lib/types'
 
-function lineItemSeries(li: LineItem): Record<string, number | undefined> {
-  const merged: Record<string, number | undefined> = {}
-  allPeriods.forEach((p) => {
-    if (p.isClosed) {
-      merged[p.key] = li.actuals[p.key]
-    } else {
-      merged[p.key] = li.forecastMode === 'direct' ? li.directValues[p.key] : li.forecast[p.key]
-    }
-  })
-  return merged
+function Cell({ value, column }: { value: CellValue; column: DisplayColumn }) {
+  const shown = column.isClosed ? value.actual : value.forecast
+  return (
+    <div className="px-4 py-3 text-right text-sm tabular-nums text-ink-primary">
+      {shown === undefined ? <span className="text-ink-muted">—</span> : formatMoney(shown)}
+    </div>
+  )
 }
 
 export default function ModelWorksheetPage() {
@@ -37,8 +28,18 @@ export default function ModelWorksheetPage() {
 
   const [view, setView] = useState<ViewMode>('week')
   const [tab, setTab] = useState<'worksheet' | 'history'>('worksheet')
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [drawerState, setDrawerState] = useState<{ mode: 'new'; category: LineItemCategory } | { mode: 'edit'; id: string } | null>(
     null,
+  )
+
+  const lineItemsById = useMemo(() => Object.fromEntries(lineItems.map((li) => [li.id, li])), [lineItems])
+  const rowLayout = model?.rowLayout ?? []
+  const columns = buildColumns(allPeriods, view)
+  const rowValues = useMemo(() => computeRowValues(rowLayout, lineItemsById, allPeriods), [rowLayout, lineItemsById])
+  const balanceChain = useMemo(
+    () => computeBalanceChain(rowValues, 'totalReceipts', 'netDisbursements', allPeriods, OPENING_BALANCE_START),
+    [rowValues],
   )
 
   if (!model) {
@@ -53,12 +54,36 @@ export default function ModelWorksheetPage() {
   }
 
   const modelId2 = model.id
-  const modelLineItems = model.lineItemIds.map((id) => lineItems.find((li) => li.id === id)).filter((li): li is LineItem => !!li)
-  const inflows = modelLineItems.filter((li) => li.category === 'receipts')
-  const outflows = modelLineItems.filter((li) => li.category === 'disbursements')
-  const columns = buildColumns(allPeriods, view)
+  // Split each category right before its first section-terminal total, so the
+  // "+ Add … driver" affordance lands exactly where a new ad-hoc leaf would be
+  // inserted (store.addLineItem appends before that same total). Any *later* totals
+  // in the category (e.g. disbursements' Total Other / Net Disbursements) stay in
+  // their natural position within the second slice — nothing gets reordered.
+  const receiptsAll = rowLayout.filter((r) => r.category === 'receipts')
+  const receiptsSplitAt = receiptsAll.findIndex((r) => r.kind === 'total')
+  const receiptsRows = receiptsSplitAt === -1 ? receiptsAll : receiptsAll.slice(0, receiptsSplitAt)
+  const receiptsTotal = receiptsSplitAt === -1 ? [] : receiptsAll.slice(receiptsSplitAt)
 
-  const editingItem = drawerState?.mode === 'edit' ? lineItems.find((li) => li.id === drawerState.id) ?? null : null
+  const disbursementsAll = rowLayout.filter((r) => r.category === 'disbursements')
+  const disbursementsSplitAt = disbursementsAll.findIndex((r) => r.kind === 'total')
+  const disbursementsRows = disbursementsSplitAt === -1 ? disbursementsAll : disbursementsAll.slice(0, disbursementsSplitAt)
+  const disbursementsTotals = disbursementsSplitAt === -1 ? [] : disbursementsAll.slice(disbursementsSplitAt)
+
+  const editingLineItem = drawerState?.mode === 'edit' ? lineItems.find((li) => li.id === drawerState.id) ?? null : null
+
+  function toggle(id: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function renderCell(row: RowDef, column: DisplayColumn) {
+    const value = aggregateForColumn(rowValues[row.id] ?? {}, column)
+    return <Cell value={value} column={column} />
+  }
 
   function handleSaveLineItem(patch: {
     name: string
@@ -70,75 +95,16 @@ export default function ModelWorksheetPage() {
     actualsFormula: string
     actuals: Record<string, number>
   }) {
-    if (!model) return
     if (drawerState?.mode === 'edit') {
-      updateLineItem(model.id, drawerState.id, patch)
+      updateLineItem(modelId2, drawerState.id, patch)
     } else {
-      addLineItem(model.id, { ...patch, forecast: {} })
+      addLineItem(modelId2, patch.category, { ...patch, forecast: {} })
     }
     setDrawerState(null)
   }
 
-  function Row({ li }: { li: LineItem }) {
-    const series = lineItemSeries(li)
-    return (
-      <div className="group grid items-center gap-0 border-b border-border" style={{ gridTemplateColumns: `280px repeat(${columns.length}, 1fr)` }}>
-        <div className="sticky left-0 flex items-center gap-1.5 border-r border-border bg-card px-6 py-3 pl-10 text-sm text-ink-primary">
-          <span className="truncate">{li.name}</span>
-          <span className="ml-auto flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
-            <button
-              onClick={() => setDrawerState({ mode: 'edit', id: li.id })}
-              className="rounded p-1 text-ink-muted hover:bg-page hover:text-ink-primary"
-              aria-label="Edit line item"
-            >
-              <PencilIcon className="h-3.5 w-3.5" />
-            </button>
-            <button
-              onClick={() => removeLineItem(modelId2, li.id)}
-              className="rounded p-1 text-red-text opacity-70 hover:bg-red-bg hover:opacity-100"
-              aria-label="Delete line item"
-            >
-              <TrashIcon className="h-3.5 w-3.5" />
-            </button>
-          </span>
-        </div>
-        {columns.map((col) => {
-          const val = sumByColumn(series, col)
-          return (
-            <div key={col.key} className="px-4 py-3 text-right text-sm tabular-nums text-ink-primary">
-              {val === undefined ? <span className="text-ink-muted">—</span> : formatMoney(val)}
-            </div>
-          )
-        })}
-      </div>
-    )
-  }
-
-  function GroupHeader({ label, bg, text }: { label: string; bg: string; text: string }) {
-    return (
-      <div
-        className="grid items-center border-b border-border px-6 py-2.5 text-sm font-semibold"
-        style={{ gridTemplateColumns: `280px repeat(${columns.length}, 1fr)`, backgroundColor: bg, color: text }}
-      >
-        <div className="sticky left-0" style={{ backgroundColor: bg }}>
-          {label}
-        </div>
-        {columns.map((c) => (
-          <div key={c.key} />
-        ))}
-      </div>
-    )
-  }
-
-  function AddRow({ category }: { category: LineItemCategory }) {
-    return (
-      <button
-        onClick={() => setDrawerState({ mode: 'new', category })}
-        className="flex w-full items-center gap-1.5 border-b border-border px-6 py-3 pl-10 text-sm font-medium text-ink-secondary hover:bg-page hover:text-ink-primary"
-      >
-        <PlusIcon className="h-3.5 w-3.5" /> Add {category === 'receipts' ? 'inflow' : 'outflow'} driver
-      </button>
-    )
+  function handleDelete(row: RowDef) {
+    removeLineItem(modelId2, row.id)
   }
 
   return (
@@ -181,31 +147,89 @@ export default function ModelWorksheetPage() {
       {tab === 'worksheet' ? (
         <div className="overflow-x-auto">
           <div className="min-w-max">
-            <div
-              className="grid border-b border-border bg-table-header"
-              style={{ gridTemplateColumns: `280px repeat(${columns.length}, 1fr)` }}
+            <RowTableHeader columns={columns} />
+
+            <RowLine
+              label="Beginning cash balance"
+              columns={columns}
+              bold
+              tint
+              renderCell={(c) => <Cell value={aggregateSnapshotForColumn(balanceChain.beginning, c, 'first')} column={c} />}
+            />
+
+            <SectionBanner label="RECEIPTS" bg="#F0F6F2" text="#376A42" columns={columns} />
+            <RowTableBody
+              rowLayout={receiptsRows}
+              columns={columns}
+              collapsedGroupIds={collapsed}
+              onToggleGroup={toggle}
+              renderCell={renderCell}
+              onEditLeaf={(row) => (row.kind === 'leaf' ? setDrawerState({ mode: 'edit', id: row.id }) : undefined)}
+              onDeleteLeaf={(row) => (row.kind === 'leaf' ? handleDelete(row) : undefined)}
+            />
+            <button
+              onClick={() => setDrawerState({ mode: 'new', category: 'receipts' })}
+              className="flex w-full items-center gap-1.5 border-b border-border px-6 py-3 pl-10 text-sm font-medium text-ink-secondary hover:bg-page hover:text-ink-primary"
             >
-              <div className="sticky left-0 bg-table-header px-6 py-3">
-                <LabelCaps>Particulars</LabelCaps>
-              </div>
-              {columns.map((c) => (
-                <div key={c.key} className="px-4 py-3 text-right">
-                  <LabelCaps>{c.label}</LabelCaps>
-                </div>
-              ))}
-            </div>
+              <PlusIcon className="h-3.5 w-3.5" /> Add inflow driver
+            </button>
+            <RowTableBody
+              rowLayout={receiptsTotal}
+              columns={columns}
+              collapsedGroupIds={collapsed}
+              onToggleGroup={toggle}
+              renderCell={renderCell}
+            />
 
-            <GroupHeader label="Cash Inflows" bg="#F0F6F2" text="#376A42" />
-            {inflows.map((li) => (
-              <Row key={li.id} li={li} />
-            ))}
-            <AddRow category="receipts" />
+            <SectionBanner label="Disbursements" bg="#FBF1EF" text="#B14434" columns={columns} />
+            <RowTableBody
+              rowLayout={disbursementsRows}
+              columns={columns}
+              collapsedGroupIds={collapsed}
+              onToggleGroup={toggle}
+              renderCell={renderCell}
+              onEditLeaf={(row) => (row.kind === 'leaf' ? setDrawerState({ mode: 'edit', id: row.id }) : undefined)}
+              onDeleteLeaf={(row) => (row.kind === 'leaf' ? handleDelete(row) : undefined)}
+            />
+            <button
+              onClick={() => setDrawerState({ mode: 'new', category: 'disbursements' })}
+              className="flex w-full items-center gap-1.5 border-b border-border px-6 py-3 pl-10 text-sm font-medium text-ink-secondary hover:bg-page hover:text-ink-primary"
+            >
+              <PlusIcon className="h-3.5 w-3.5" /> Add outflow driver
+            </button>
+            <RowTableBody
+              rowLayout={disbursementsTotals}
+              columns={columns}
+              collapsedGroupIds={collapsed}
+              onToggleGroup={toggle}
+              renderCell={renderCell}
+            />
 
-            <GroupHeader label="Cash Outflows" bg="#FBF1EF" text="#9B3B37" />
-            {outflows.map((li) => (
-              <Row key={li.id} li={li} />
-            ))}
-            <AddRow category="disbursements" />
+            <RowLine
+              label="Net unrestricted cash increase/(decrease)"
+              columns={columns}
+              bold
+              renderCell={(c) => {
+                const receipts = aggregateForColumn(rowValues['totalReceipts'] ?? {}, c)
+                const netDisb = aggregateForColumn(rowValues['netDisbursements'] ?? {}, c)
+                const shown = c.isClosed
+                  ? receipts.actual !== undefined || netDisb.actual !== undefined
+                    ? (receipts.actual ?? 0) + (netDisb.actual ?? 0)
+                    : undefined
+                  : receipts.forecast !== undefined || netDisb.forecast !== undefined
+                    ? (receipts.forecast ?? 0) + (netDisb.forecast ?? 0)
+                    : undefined
+                return <Cell value={c.isClosed ? { actual: shown } : { forecast: shown }} column={c} />
+              }}
+            />
+
+            <RowLine
+              label="Ending unrestricted cash"
+              columns={columns}
+              bold
+              tint
+              renderCell={(c) => <Cell value={aggregateSnapshotForColumn(balanceChain.ending, c, 'last')} column={c} />}
+            />
           </div>
         </div>
       ) : (
@@ -226,7 +250,7 @@ export default function ModelWorksheetPage() {
                   )}
                   {h.change === 'reordered' && (
                     <>
-                      Line item reordered: <span className="font-medium">&ldquo;{h.lineItemName}&rdquo;</span>
+                      Structural change: <span className="font-medium">&ldquo;{h.lineItemName}&rdquo;</span>
                     </>
                   )}
                   {h.change === 'formula_changed' && (
@@ -235,7 +259,7 @@ export default function ModelWorksheetPage() {
                     </>
                   )}
                 </div>
-                {h.change === 'formula_changed' && (
+                {(h.change === 'formula_changed' || h.change === 'reordered') && (
                   <div className="mt-1 font-mono text-xs text-ink-secondary">
                     {h.oldFormula} → {h.newFormula}
                   </div>
@@ -250,11 +274,11 @@ export default function ModelWorksheetPage() {
       <LineItemDrawer
         open={!!drawerState}
         onClose={() => setDrawerState(null)}
-        lineItem={editingItem}
+        lineItem={editingLineItem}
         defaultCategory={drawerState?.mode === 'new' ? drawerState.category : 'receipts'}
         periods={allPeriods}
         drivers={drivers}
-        otherLineItems={modelLineItems}
+        otherLineItems={lineItems}
         onSave={handleSaveLineItem}
       />
     </div>

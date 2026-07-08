@@ -1,54 +1,24 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { LabelCaps, SecondaryButton, SegmentedControl, Select } from '../components/ui'
+import { RowLine, RowTableBody, RowTableHeader, SectionBanner } from '../components/RowTable'
+import { OPENING_BALANCE_START } from '../data/seed'
 import { useStore } from '../lib/store'
 import { formatMoney } from '../lib/format'
 import { buildColumns, type DisplayColumn, type ViewMode } from '../lib/periodAggregate'
-import type { ForecastRow } from '../lib/types'
+import {
+  aggregateForColumn,
+  aggregateSnapshotForColumn,
+  computeBalanceChain,
+  computeRowValues,
+  type CellValue,
+} from '../lib/rowEngine'
+import type { RowDef } from '../lib/types'
 
 type ScenarioCase = 'base' | 'bull' | 'bear'
 
-function aggregateCell(row: ForecastRow, column: DisplayColumn) {
-  // Balance rows are point-in-time snapshots, not flows — take the
-  // opening snapshot from the first period and the ending snapshot from
-  // the last period rather than summing across the month.
-  if (row.kind === 'balance') {
-    const key = row.id === 'endingBalance' ? column.periodKeys[column.periodKeys.length - 1] : column.periodKeys[0]
-    const cell = row.values[key]
-    return cell ?? { actual: undefined, forecast: undefined, scenario: undefined }
-  }
-
-  let actualSum: number | undefined
-  let forecastSum: number | undefined
-  const scenarioSum: Record<string, number> = { base: 0, bull: 0, bear: 0 }
-  let hasScenario = false
-
-  column.periodKeys.forEach((k) => {
-    const cell = row.values[k]
-    if (!cell) return
-    if (cell.actual !== undefined) actualSum = (actualSum ?? 0) + cell.actual
-    if (cell.forecast !== undefined) forecastSum = (forecastSum ?? 0) + cell.forecast
-    if (cell.scenario) {
-      hasScenario = true
-      ;(['base', 'bull', 'bear'] as const).forEach((s) => {
-        scenarioSum[s] += cell.scenario?.[s] ?? 0
-      })
-    }
-  })
-
-  return { actual: actualSum, forecast: forecastSum, scenario: hasScenario ? scenarioSum : undefined }
-}
-
-function Cell({
-  row,
-  column,
-  scenarioCase,
-}: {
-  row: ForecastRow
-  column: DisplayColumn
-  scenarioCase: ScenarioCase
-}) {
-  const { actual, forecast, scenario } = aggregateCell(row, column)
+function Cell({ value, column }: { value: CellValue; column: DisplayColumn }) {
+  const { actual, forecast } = value
 
   if (column.isClosed) {
     const variance = actual !== undefined && forecast !== undefined ? actual - forecast : undefined
@@ -65,6 +35,16 @@ function Cell({
     )
   }
 
+  return (
+    <div className="px-4 py-3 text-right">
+      <div className="text-sm font-medium tabular-nums text-ink-primary">{formatMoney(forecast)}</div>
+    </div>
+  )
+}
+
+function ScenarioCell({ value, column, scenarioCase }: { value: CellValue; column: DisplayColumn; scenarioCase: ScenarioCase }) {
+  if (column.isClosed) return <Cell value={value} column={column} />
+  const { forecast, scenario } = value
   if (!scenario || scenarioCase === 'base') {
     return (
       <div className="px-4 py-3 text-right">
@@ -72,7 +52,6 @@ function Cell({
       </div>
     )
   }
-
   return (
     <div className="px-4 py-3 text-right">
       <div className="text-sm font-medium tabular-nums text-ink-primary">{formatMoney(scenario[scenarioCase])}</div>
@@ -84,10 +63,11 @@ function Cell({
 export default function ForecastDetailPage() {
   const { forecastId } = useParams<{ forecastId: string }>()
   const navigate = useNavigate()
-  const { forecast, getModel } = useStore()
+  const { forecast, getModel, lineItems } = useStore()
   const [view, setView] = useState<ViewMode>('week')
   const [scenarioCase, setScenarioCase] = useState<ScenarioCase>('base')
   const [scenario, setScenario] = useState('hikeAnalysis')
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
 
   if (!forecastId || forecast.id !== forecastId) {
     return (
@@ -100,8 +80,33 @@ export default function ForecastDetailPage() {
     )
   }
 
-  const model = getModel(forecast.modelId)
+  const resolvedModel = getModel(forecast.modelId)
   const columns = buildColumns(forecast.periods, view)
+  const lineItemsById = useMemo(() => Object.fromEntries(lineItems.map((li) => [li.id, li])), [lineItems])
+  const rowLayout = resolvedModel?.rowLayout ?? []
+  const rowValues = useMemo(() => computeRowValues(rowLayout, lineItemsById, forecast.periods), [rowLayout, lineItemsById, forecast.periods])
+  const balanceChain = useMemo(
+    () => computeBalanceChain(rowValues, 'totalReceipts', 'netDisbursements', forecast.periods, OPENING_BALANCE_START),
+    [rowValues, forecast.periods],
+  )
+
+  const receiptsRows = rowLayout.filter((r) => r.category === 'receipts')
+  const disbursementsRows = rowLayout.filter((r) => r.category === 'disbursements')
+
+  function toggle(id: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function renderCell(row: RowDef, column: DisplayColumn) {
+    const values = rowValues[row.id] ?? {}
+    const value = aggregateForColumn(values, column)
+    return <ScenarioCell value={value} column={column} scenarioCase={scenarioCase} />
+  }
 
   return (
     <div>
@@ -118,7 +123,7 @@ export default function ForecastDetailPage() {
             </div>
             <div>
               <LabelCaps>Model</LabelCaps>
-              <div className="text-sm font-medium text-ink-primary">{model?.name ?? forecast.modelId}</div>
+              <div className="text-sm font-medium text-ink-primary">{resolvedModel?.name ?? forecast.modelId}</div>
             </div>
             <SegmentedControl
               options={[
@@ -154,57 +159,65 @@ export default function ForecastDetailPage() {
 
       <div className="overflow-x-auto">
         <div className="min-w-max">
-          <div className="grid border-b border-border bg-table-header" style={{ gridTemplateColumns: `240px repeat(${columns.length}, 1fr)` }}>
-            <div className="sticky left-0 bg-table-header px-6 py-3">
-              <LabelCaps>Particulars</LabelCaps>
-            </div>
-            {columns.map((c) => (
-              <div key={c.key} className="px-4 py-3 text-right">
-                <LabelCaps>{c.label}</LabelCaps>
-              </div>
-            ))}
-          </div>
+          <RowTableHeader columns={columns} />
 
-          {forecast.rows.map((row) => {
-            if (row.kind === 'group') {
-              const bg = row.category === 'receipts' ? '#F0F6F2' : '#FBF1EF'
-              const text = row.category === 'receipts' ? '#376A42' : '#9B3B37'
-              return (
-                <div
-                  key={row.id}
-                  className="grid items-center border-b border-border px-6 py-2.5 text-sm font-semibold"
-                  style={{ gridTemplateColumns: `240px repeat(${columns.length}, 1fr)`, backgroundColor: bg, color: text }}
-                >
-                  <div className="sticky left-0" style={{ backgroundColor: bg }}>
-                    {row.label}
-                  </div>
-                  {columns.map((c) => (
-                    <div key={c.key} />
-                  ))}
-                </div>
-              )
-            }
+          <RowLine
+            label="Beginning cash balance"
+            columns={columns}
+            bold
+            tint
+            renderCell={(c) => {
+              const value = aggregateSnapshotForColumn(balanceChain.beginning, c, 'first')
+              return <ScenarioCell value={value} column={c} scenarioCase={scenarioCase} />
+            }}
+          />
 
-            const isEmphasis = row.kind === 'balance' || row.kind === 'total'
-            return (
-              <div
-                key={row.id}
-                className={`grid items-center border-b border-border ${isEmphasis ? 'bg-page/60 font-semibold' : ''}`}
-                style={{ gridTemplateColumns: `240px repeat(${columns.length}, 1fr)` }}
-              >
-                <div
-                  className={`sticky left-0 border-r border-border px-6 py-3 text-sm text-ink-primary ${
-                    row.kind === 'child' ? 'pl-10' : ''
-                  } ${isEmphasis ? 'bg-page' : 'bg-card'}`}
-                >
-                  {row.label}
-                </div>
-                {columns.map((c) => (
-                  <Cell key={c.key} row={row} column={c} scenarioCase={scenarioCase} />
-                ))}
-              </div>
-            )
-          })}
+          <SectionBanner label="RECEIPTS" bg="#F0F6F2" text="#376A42" columns={columns} />
+          <RowTableBody rowLayout={receiptsRows} columns={columns} collapsedGroupIds={collapsed} onToggleGroup={toggle} renderCell={renderCell} />
+
+          <SectionBanner label="Disbursements" bg="#FBF1EF" text="#B14434" columns={columns} />
+          <RowTableBody
+            rowLayout={disbursementsRows}
+            columns={columns}
+            collapsedGroupIds={collapsed}
+            onToggleGroup={toggle}
+            renderCell={renderCell}
+          />
+
+          <RowLine
+            label="Net unrestricted cash increase/(decrease)"
+            columns={columns}
+            bold
+            renderCell={(c) => {
+              const receipts = aggregateForColumn(rowValues['totalReceipts'] ?? {}, c)
+              const netDisb = aggregateForColumn(rowValues['netDisbursements'] ?? {}, c)
+              const value: CellValue = {
+                actual: receipts.actual !== undefined || netDisb.actual !== undefined ? (receipts.actual ?? 0) + (netDisb.actual ?? 0) : undefined,
+                forecast:
+                  receipts.forecast !== undefined || netDisb.forecast !== undefined ? (receipts.forecast ?? 0) + (netDisb.forecast ?? 0) : undefined,
+                scenario:
+                  receipts.scenario || netDisb.scenario
+                    ? {
+                        base: (receipts.scenario?.base ?? 0) + (netDisb.scenario?.base ?? 0),
+                        bull: (receipts.scenario?.bull ?? 0) + (netDisb.scenario?.bull ?? 0),
+                        bear: (receipts.scenario?.bear ?? 0) + (netDisb.scenario?.bear ?? 0),
+                      }
+                    : undefined,
+              }
+              return <ScenarioCell value={value} column={c} scenarioCase={scenarioCase} />
+            }}
+          />
+
+          <RowLine
+            label="Ending unrestricted cash"
+            columns={columns}
+            bold
+            tint
+            renderCell={(c) => {
+              const value = aggregateSnapshotForColumn(balanceChain.ending, c, 'last')
+              return <ScenarioCell value={value} column={c} scenarioCase={scenarioCase} />
+            }}
+          />
         </div>
       </div>
     </div>

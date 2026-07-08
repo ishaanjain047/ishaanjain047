@@ -140,6 +140,9 @@ export interface Driver {
 export type LineItemCategory = 'receipts' | 'disbursements'
 export type LineItemKind = 'formula' | 'direct'
 
+// An editable, driver-wireable detail record. Every 'leaf' RowDef points at exactly one
+// of these. Groups/subtotals/totals are pure structural rollups and have no LineItem of
+// their own — see RowDef below.
 export interface LineItem {
   id: string
   name: string
@@ -162,13 +165,38 @@ export interface ModelHistoryEntry {
   newFormula?: string
 }
 
+// The default line-item table structure (Section 1 of the Drivers Module follow-up
+// spec) mirrors the ChargePoint workbook one-to-one: groups with a flat list of leaf
+// entities, optional mid-group subtotal checkpoints (e.g. "Total North American
+// Collections"), and section-terminal totals (e.g. "Total Receipts"). This is expressed
+// as a single flat, ordered array rather than a recursive tree because every group in
+// the workbook is exactly one level deep — subtotal/total rows are themselves flat
+// siblings, just tagged with which preceding rows they roll up.
+export type RowKind = 'group' | 'leaf' | 'subtotal' | 'total'
+
+export interface RowDef {
+  id: string
+  name: string
+  kind: RowKind
+  category: LineItemCategory
+  // Present on 'leaf' and 'subtotal' rows that are nested one level under a 'group' row.
+  // Absent for top-level rows (including top-level leaves like "Customer Refunds").
+  parentId?: string
+  // Present on 'group' | 'subtotal' | 'total' rows: the ids of the rows to sum for this
+  // row's own value. May reference leaf rows directly or other group/subtotal/total rows
+  // (already-computed rollups), never both redundantly for the same underlying amount.
+  sumIds?: string[]
+  // Present on 'leaf' rows only — the id of the editable LineItem record.
+  lineItemId?: string
+}
+
 export interface CashFlowModel {
   id: string
   name: string
   fiscalYear: string
   description: string
   status: 'Published' | 'Draft'
-  lineItemIds: string[]
+  rowLayout: RowDef[]
   history: ModelHistoryEntry[]
   updatedAt: string
 }
@@ -186,19 +214,10 @@ export interface Scenario {
   name: string
 }
 
-export interface ForecastRow {
-  id: string
-  label: string
-  kind: 'balance' | 'group' | 'child' | 'total'
-  category?: LineItemCategory
-  values: Record<string, { actual?: number; forecast?: number; scenario?: Record<string, number> }>
-}
-
 export interface Forecast {
   id: string
   name: string
   entity: string
   modelId: string
   periods: Period[]
-  rows: ForecastRow[]
 }

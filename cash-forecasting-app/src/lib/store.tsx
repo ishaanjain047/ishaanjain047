@@ -14,8 +14,10 @@ import type {
   Forecast,
   HistoryEntry,
   LineItem,
+  LineItemCategory,
   ModelHistoryEntry,
   NetsuiteMapping,
+  RowDef,
 } from './types'
 
 function nowIso() {
@@ -57,7 +59,7 @@ interface Store {
     reason: string,
   ) => void
   addModel: (input: { name: string; fiscalYear: string; description: string }) => CashFlowModel
-  addLineItem: (modelId: string, item: Omit<LineItem, 'id'>) => LineItem
+  addLineItem: (modelId: string, category: LineItemCategory, item: Omit<LineItem, 'id' | 'category'>) => LineItem
   updateLineItem: (modelId: string, id: string, patch: Partial<LineItem>) => void
   removeLineItem: (modelId: string, id: string) => void
 }
@@ -209,7 +211,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         fiscalYear: input.fiscalYear,
         description: input.description,
         status: 'Draft',
-        lineItemIds: [],
+        rowLayout: [],
         history: [],
         updatedAt: nowIso(),
       }
@@ -217,9 +219,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       return model
     }
 
-    function addLineItem(modelId: string, item: Omit<LineItem, 'id'>) {
+    // Terminal section total that a freshly-added, ungrouped leaf rolls up into.
+    const CATEGORY_TOTAL_ID: Record<LineItemCategory, string> = {
+      receipts: 'totalReceipts',
+      disbursements: 'totalOperatingDisbursements',
+    }
+
+    function addLineItem(modelId: string, category: LineItemCategory, item: Omit<LineItem, 'id' | 'category'>) {
       const id = `li_${Date.now()}`
-      const lineItem: LineItem = { ...item, id }
+      const lineItem: LineItem = { ...item, id, category }
       setLineItems((prev) => [...prev, lineItem])
       setModels((prev) =>
         prev.map((m) => {
@@ -230,7 +238,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             change: 'line_item_added',
             lineItemName: item.name,
           }
-          return { ...m, lineItemIds: [...m.lineItemIds, id], history: [histEntry, ...m.history], updatedAt: histEntry.date }
+          const newRow: RowDef = { id, name: item.name, kind: 'leaf', category, lineItemId: id }
+          const totalId = CATEGORY_TOTAL_ID[category]
+          const insertAt = m.rowLayout.findIndex((r) => r.id === totalId)
+          const nextLayout =
+            insertAt === -1
+              ? [...m.rowLayout, newRow]
+              : [...m.rowLayout.slice(0, insertAt), newRow, ...m.rowLayout.slice(insertAt)]
+          const layoutWithTotalUpdated = nextLayout.map((r) =>
+            r.id === totalId ? { ...r, sumIds: [...(r.sumIds ?? []), id] } : r,
+          )
+          return { ...m, rowLayout: layoutWithTotalUpdated, history: [histEntry, ...m.history], updatedAt: histEntry.date }
         }),
       )
       return lineItem
@@ -269,9 +287,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             change: 'line_item_removed',
             lineItemName: existing?.name ?? id,
           }
+          const nextLayout = m.rowLayout
+            .filter((r) => r.id !== id)
+            .map((r) => (r.sumIds ? { ...r, sumIds: r.sumIds.filter((sid) => sid !== id) } : r))
           return {
             ...m,
-            lineItemIds: m.lineItemIds.filter((lid) => lid !== id),
+            rowLayout: nextLayout,
             history: [histEntry, ...m.history],
             updatedAt: histEntry.date,
           }

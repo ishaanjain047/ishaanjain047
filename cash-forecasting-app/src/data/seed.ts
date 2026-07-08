@@ -2,9 +2,9 @@ import type {
   CashFlowModel,
   Driver,
   Forecast,
-  ForecastRow,
   LineItem,
   Period,
+  RowDef,
 } from '../lib/types'
 
 export const CURRENT_USER = 'Ishaan Jain'
@@ -346,8 +346,8 @@ export const drivers: Driver[] = [
     type: 'ratio',
     frequency: 'Weekly',
     netsuiteMapping: null,
-    fields: { sourceRef: 'totalCollectionsNA', percentage: 1.5 },
-    derivationLogic: 'Customer refunds modeled as a fixed percentage of the same-week NA collections line item.',
+    fields: { sourceRef: 'colNA_cpInc', percentage: 1.5 },
+    derivationLogic: 'Customer refunds modeled as a fixed percentage of the same-week CP Inc. (NA Collections) line item.',
     lastEditReason: 'Initial creation',
     history: [],
     updatedAt: '2026-05-18T15:10:00Z',
@@ -356,7 +356,10 @@ export const drivers: Driver[] = [
 ]
 
 // ---------------------------------------------------------------------------
-// Line items
+// Line items — mirrors the ChargePoint Cash Flow Forecast workbook (Actuals +
+// Forecast sheet) one-to-one: same entity names, same nesting, same order. Only the
+// structure is pre-seeded — every leaf below is empty (em-dash) unless a driver has
+// actually been wired to it, which is true for a handful of representative rows only.
 // ---------------------------------------------------------------------------
 
 function buildActualsForecast(base: number, amp: number, phase: number) {
@@ -374,83 +377,185 @@ function buildActualsForecast(base: number, amp: number, phase: number) {
   return { actuals, forecast }
 }
 
-export const lineItems: LineItem[] = [
-  (() => {
-    const { actuals, forecast } = buildActualsForecast(2400000, 260000, 0)
-    return {
-      id: 'totalCollectionsNA',
-      name: 'Total Collections — NA',
-      category: 'receipts',
-      forecastMode: 'formula',
-      formula: 'erpTrailingStatNA',
-      actualsMode: 'formula',
-      actualsFormula: 'erpTrailingStatNA',
-      actuals,
-      forecast,
-      directValues: {},
-    } satisfies LineItem
-  })(),
-  (() => {
-    const { actuals, forecast } = buildActualsForecast(100000, 8000, 1.2)
-    return {
-      id: 'planAllocationInflow',
-      name: 'Plan of Record Inflow',
-      category: 'receipts',
-      forecastMode: 'formula',
-      formula: 'planAllocationQ3',
-      actualsMode: 'formula',
-      actualsFormula: 'planAllocationQ3',
-      actuals,
-      forecast,
-      directValues: {},
-    } satisfies LineItem
-  })(),
-  (() => {
-    const { actuals, forecast } = buildActualsForecast(-36000, 4000, 2)
-    return {
-      id: 'customerRefunds',
-      name: 'Customer Refunds',
-      category: 'disbursements',
-      forecastMode: 'formula',
-      formula: 'totalCollectionsNA * customerRefundsRatio',
-      actualsMode: 'formula',
-      actualsFormula: 'totalCollectionsNA * customerRefundsRatio',
-      actuals,
-      forecast,
-      directValues: {},
-    } satisfies LineItem
-  })(),
-  (() => {
-    const { actuals, forecast } = buildActualsForecast(-812000, 60000, 0.8)
-    return {
-      id: 'apTier1Outflow',
-      name: 'AP Outflow — Tier-1 Vendors',
-      category: 'disbursements',
-      forecastMode: 'formula',
-      formula: '-(vendorTier1History * apTier1Calibration)',
-      actualsMode: 'formula',
-      actualsFormula: '-(vendorTier1History * apTier1Calibration)',
-      actuals,
-      forecast,
-      directValues: {},
-    } satisfies LineItem
-  })(),
-  {
-    id: 'payrollNA',
-    name: 'Payroll — NA',
-    category: 'disbursements',
-    forecastMode: 'formula',
-    formula: 'payrollNARecurring',
+function emptyLeaf(id: string, name: string, category: 'receipts' | 'disbursements'): LineItem {
+  return {
+    id,
+    name,
+    category,
+    forecastMode: 'direct',
+    formula: '',
     actualsMode: 'direct',
     actualsFormula: '',
-    actuals: Object.fromEntries(periods.filter((p) => p.isClosed).map((p, i) => [p.key, i % 2 === 0 ? -540000 : -60000])),
-    forecast: Object.fromEntries(periods.filter((p) => !p.isClosed).map((p, i) => [p.key, i % 2 === 0 ? -545000 : -62000])),
+    actuals: {},
+    forecast: {},
     directValues: {},
-  },
+  }
+}
+
+function wireFormula(item: LineItem, formula: string, base: number, amp: number, phase: number): LineItem {
+  const { actuals, forecast } = buildActualsForecast(base, amp, phase)
+  return { ...item, forecastMode: 'formula', formula, actualsMode: 'formula', actualsFormula: formula, actuals, forecast }
+}
+
+const leaves: LineItem[] = [
+  // --- RECEIPTS — Collections — North American entities ---
+  emptyLeaf('colNA_cpInc', 'CP Inc.', 'receipts'),
+  emptyLeaf('colNA_cpCanada', 'CP Canada Inc.', 'receipts'),
+  emptyLeaf('colNA_cpMexico', 'CP Mexico S. de R.L. de C.V.', 'receipts'),
+  emptyLeaf('colNA_eaton', 'Eaton', 'receipts'),
+  // --- RECEIPTS — Collections — European (+India) entities ---
+  emptyLeaf('colEU_cpIndia', 'CP Technologies India Pvt. Ltd', 'receipts'),
+  emptyLeaf('colEU_cpAustria', 'CP Austria GmbH', 'receipts'),
+  emptyLeaf('colEU_cpFranceSAS', 'CP Network (France) SAS', 'receipts'),
+  emptyLeaf('colEU_cpGermany', 'CP Germany GmbH', 'receipts'),
+  emptyLeaf('colEU_cpUK', 'CP Network (UK) Ltd', 'receipts'),
+  emptyLeaf('colEU_cpNetherlands', 'CP Network (Netherlands) B.V.', 'receipts'),
+  emptyLeaf('colEU_cpItaly', 'CP Italy S.r.l.', 'receipts'),
+  emptyLeaf('colEU_cpSpain', 'CP Spain SL', 'receipts'),
+  emptyLeaf('colEU_cpEuropeanHoldings', 'CP European Holdings B.V.', 'receipts'),
+  // --- RECEIPTS — top-level detail lines ---
+  emptyLeaf('customerRefunds', 'Customer Refunds', 'receipts'),
+  emptyLeaf('cashSaleWebstore', 'Cash Sale – Webstore', 'receipts'),
+  // --- RECEIPTS — Roaming Partner ---
+  emptyLeaf('roam_cpInc', 'ChargePoint Inc.', 'receipts'),
+  emptyLeaf('roam_cpCanada', 'ChargePoint Canada Inc.', 'receipts'),
+  emptyLeaf('roam_cpNetherlands', 'ChargePoint Network (Netherlands) B.V.', 'receipts'),
+  emptyLeaf('roam_cpAustria', 'ChargePoint Austria GmbH', 'receipts'),
+  emptyLeaf('roam_roamingVendor', 'Roaming vendor', 'receipts'),
+  // --- RECEIPTS — Drivers ---
+  emptyLeaf('drv_driverFunds', 'Driver funds', 'receipts'),
+  emptyLeaf('drv_flexBilling', 'Flex billing', 'receipts'),
+  // --- RECEIPTS — ChargePoint Austria GmbH (standalone group, distinct from the two
+  // ChargePoint/CP Austria entities above — see Section 1.5 ambiguity note) ---
+  emptyLeaf('austriaGrp_driverFunds', 'Austria Driver funds', 'receipts'),
+  emptyLeaf('austriaGrp_communityRefunds', 'Austria community refunds', 'receipts'),
+  // --- RECEIPTS — top-level ---
+  emptyLeaf('otherReceipts', 'Other', 'receipts'),
+
+  // --- DISBURSEMENTS — Payroll ---
+  emptyLeaf('payroll_cpInc', 'CP Inc.', 'disbursements'),
+  emptyLeaf('payroll_cpCanada', 'CP Canada Inc.', 'disbursements'),
+  emptyLeaf('payroll_cpMexico', 'CP Mexico S. de R.L. de C.V.', 'disbursements'),
+  emptyLeaf('payroll_cpIndia', 'CP Technologies India Pvt. Ltd', 'disbursements'),
+  emptyLeaf('payroll_cpAustria', 'CP Austria GmbH', 'disbursements'),
+  emptyLeaf('payroll_cpFranceSAS', 'CP Network (France) SAS', 'disbursements'),
+  emptyLeaf('payroll_cpGermany', 'CP Germany GmbH', 'disbursements'),
+  emptyLeaf('payroll_cpUK', 'CP Network (UK) Ltd', 'disbursements'),
+  emptyLeaf('payroll_cpNetherlands', 'CP Network (Netherlands) B.V.', 'disbursements'),
+  emptyLeaf('payroll_cpItaly', 'CP Italy S.r.l.', 'disbursements'),
+  emptyLeaf('payroll_cpSpain', 'CP Spain SL', 'disbursements'),
+  emptyLeaf('payroll_severance', 'Severance', 'disbursements'),
+  // --- DISBURSEMENTS — Operating, top-level ---
+  emptyLeaf('accountsPayable', 'Accounts payable', 'disbursements'),
+  emptyLeaf('contractManufacturerPayments', 'Contract manufacturer payments', 'disbursements'),
+  emptyLeaf('inventoryPayments', 'Inventory payments', 'disbursements'),
+  emptyLeaf('contractManufacturerSettlements', 'Contract Manufacturer settlements', 'disbursements'),
+  emptyLeaf('taxPayments', 'Tax payments', 'disbursements'),
+  emptyLeaf('otherExpenses', 'Other expenses', 'disbursements'),
+  // --- DISBURSEMENTS — Other, top-level ---
+  emptyLeaf('interestIncome', 'Interest income', 'disbursements'),
+  emptyLeaf('atmSales', 'ATM Sales', 'disbursements'),
+  emptyLeaf('ghgCredits', 'Greenhouse gas credits', 'disbursements'),
+  emptyLeaf('tariffRefunds', 'Tariff refunds', 'disbursements'),
+  emptyLeaf('interestPaymentsDebtFees', 'Interest payments/debt fees, etc', 'disbursements'),
+  emptyLeaf('bankFees', 'Bank fees', 'disbursements'),
+  emptyLeaf('debtPaydown', 'Debt paydown', 'disbursements'),
+  emptyLeaf('debtAdditionsDraws', 'Debt additions/draws', 'disbursements'),
+  emptyLeaf('fxEffects', 'FX effects', 'disbursements'),
 ]
 
+const leavesById = Object.fromEntries(leaves.map((li) => [li.id, li]))
+
+// Wire a handful of representative leaves to existing Driver Registry drivers, so the
+// worksheet/forecast still demonstrate real formula + driver behavior. Every other leaf
+// above ships intentionally empty per Section 1.6.
+leavesById['colNA_cpInc'] = wireFormula(leavesById['colNA_cpInc'], 'erpTrailingStatNA', 2400000, 260000, 0)
+leavesById['customerRefunds'] = wireFormula(leavesById['customerRefunds'], 'customerRefundsRatio', -36000, 4000, 2)
+leavesById['payroll_cpInc'] = wireFormula(leavesById['payroll_cpInc'], 'payrollNARecurring', -545000, 5000, 0.3)
+leavesById['accountsPayable'] = wireFormula(leavesById['accountsPayable'], '-(vendorTier1History * apTier1Calibration)', -812000, 60000, 0.8)
+leavesById['otherReceipts'] = wireFormula(leavesById['otherReceipts'], 'planAllocationQ3', 100000, 8000, 1.2)
+
+export const lineItems: LineItem[] = leaves.map((li) => leavesById[li.id])
 export const lineItemsById = Object.fromEntries(lineItems.map((li) => [li.id, li]))
 export const driversById = Object.fromEntries(drivers.map((d) => [d.id, d]))
+
+// ---------------------------------------------------------------------------
+// Row layout — structure only (names, nesting, order). Values are computed at render
+// time from lineItemsById via lib/rowEngine.ts, shared by the Model Worksheet and
+// Forecast Detail pages so both surfaces render identically, per spec.
+// ---------------------------------------------------------------------------
+
+function leafRow(id: string, category: 'receipts' | 'disbursements', parentId?: string): RowDef {
+  return { id, name: leavesById[id].name, kind: 'leaf', category, parentId, lineItemId: id }
+}
+
+const collectionsNA = ['colNA_cpInc', 'colNA_cpCanada', 'colNA_cpMexico', 'colNA_eaton']
+const collectionsEU = [
+  'colEU_cpIndia', 'colEU_cpAustria', 'colEU_cpFranceSAS', 'colEU_cpGermany', 'colEU_cpUK',
+  'colEU_cpNetherlands', 'colEU_cpItaly', 'colEU_cpSpain', 'colEU_cpEuropeanHoldings',
+]
+const roamingPartner = ['roam_cpInc', 'roam_cpCanada', 'roam_cpNetherlands', 'roam_cpAustria', 'roam_roamingVendor']
+const driversGroup = ['drv_driverFunds', 'drv_flexBilling']
+const austriaGroup = ['austriaGrp_driverFunds', 'austriaGrp_communityRefunds']
+const payrollGroup = [
+  'payroll_cpInc', 'payroll_cpCanada', 'payroll_cpMexico', 'payroll_cpIndia', 'payroll_cpAustria',
+  'payroll_cpFranceSAS', 'payroll_cpGermany', 'payroll_cpUK', 'payroll_cpNetherlands', 'payroll_cpItaly',
+  'payroll_cpSpain', 'payroll_severance',
+]
+const operatingLeaves = [
+  'accountsPayable', 'contractManufacturerPayments', 'inventoryPayments',
+  'contractManufacturerSettlements', 'taxPayments', 'otherExpenses',
+]
+const otherLeaves = [
+  'interestIncome', 'atmSales', 'ghgCredits', 'tariffRefunds', 'interestPaymentsDebtFees',
+  'bankFees', 'debtPaydown', 'debtAdditionsDraws', 'fxEffects',
+]
+
+export const rowLayout: RowDef[] = [
+  // RECEIPTS
+  { id: 'grpCollections', name: 'Collections', kind: 'group', category: 'receipts', sumIds: ['subtotalNACollections', 'subtotalEUCollections'] },
+  ...collectionsNA.map((id) => leafRow(id, 'receipts', 'grpCollections')),
+  { id: 'subtotalNACollections', name: 'Total North American Collections', kind: 'subtotal', category: 'receipts', parentId: 'grpCollections', sumIds: collectionsNA },
+  ...collectionsEU.map((id) => leafRow(id, 'receipts', 'grpCollections')),
+  { id: 'subtotalEUCollections', name: 'Total European Collections', kind: 'subtotal', category: 'receipts', parentId: 'grpCollections', sumIds: collectionsEU },
+  leafRow('customerRefunds', 'receipts'),
+  leafRow('cashSaleWebstore', 'receipts'),
+  { id: 'grpRoamingPartner', name: 'Roaming Partner', kind: 'group', category: 'receipts', sumIds: roamingPartner },
+  ...roamingPartner.map((id) => leafRow(id, 'receipts', 'grpRoamingPartner')),
+  { id: 'grpDrivers', name: 'Drivers', kind: 'group', category: 'receipts', sumIds: driversGroup },
+  ...driversGroup.map((id) => leafRow(id, 'receipts', 'grpDrivers')),
+  { id: 'grpAustriaStandalone', name: 'ChargePoint Austria GmbH', kind: 'group', category: 'receipts', sumIds: austriaGroup },
+  ...austriaGroup.map((id) => leafRow(id, 'receipts', 'grpAustriaStandalone')),
+  leafRow('otherReceipts', 'receipts'),
+  {
+    id: 'totalReceipts',
+    name: 'Total Receipts',
+    kind: 'total',
+    category: 'receipts',
+    sumIds: ['grpCollections', 'customerRefunds', 'cashSaleWebstore', 'grpRoamingPartner', 'grpDrivers', 'grpAustriaStandalone', 'otherReceipts'],
+  },
+
+  // DISBURSEMENTS
+  { id: 'grpPayroll', name: 'Payroll', kind: 'group', category: 'disbursements', sumIds: payrollGroup },
+  ...payrollGroup.map((id) => leafRow(id, 'disbursements', 'grpPayroll')),
+  ...operatingLeaves.map((id) => leafRow(id, 'disbursements')),
+  {
+    id: 'totalOperatingDisbursements',
+    name: 'Total Operating Disbursements',
+    kind: 'total',
+    category: 'disbursements',
+    sumIds: ['grpPayroll', ...operatingLeaves],
+  },
+  ...otherLeaves.map((id) => leafRow(id, 'disbursements')),
+  { id: 'totalOther', name: 'Total Other', kind: 'total', category: 'disbursements', sumIds: otherLeaves },
+  {
+    id: 'netDisbursements',
+    name: 'Net Disbursements',
+    kind: 'total',
+    category: 'disbursements',
+    sumIds: ['totalOperatingDisbursements', 'totalOther'],
+  },
+]
 
 // ---------------------------------------------------------------------------
 // Cash Flow Models
@@ -463,13 +568,21 @@ export const models: CashFlowModel[] = [
     fiscalYear: 'FY26-27',
     description: 'Primary rolling 12-week operating cash flow model for the ChargePoint NA/EMEA consolidated entity.',
     status: 'Published',
-    lineItemIds: lineItems.map((li) => li.id),
+    rowLayout,
     history: [
+      {
+        date: '2026-07-08T10:00:00Z',
+        editor: 'Ishaan Jain',
+        change: 'reordered',
+        lineItemName: 'Full line-item structure',
+        oldFormula: 'Placeholder prototype line items',
+        newFormula: "ChargePoint Cash Flow Forecast workbook's Actuals + Forecast sheet structure, one-to-one",
+      },
       {
         date: '2026-07-02T10:00:00Z',
         editor: 'Ishaan Jain',
         change: 'formula_changed',
-        lineItemName: 'AP Outflow — Tier-1 Vendors',
+        lineItemName: 'Accounts payable',
         oldFormula: 'vendorTier1History * 1.9',
         newFormula: '-(vendorTier1History * apTier1Calibration)',
       },
@@ -477,7 +590,7 @@ export const models: CashFlowModel[] = [
         date: '2026-06-15T09:30:00Z',
         editor: 'Marco Diaz',
         change: 'line_item_added',
-        lineItemName: 'Plan of Record Inflow',
+        lineItemName: 'Other',
       },
       {
         date: '2026-05-20T13:10:00Z',
@@ -486,7 +599,7 @@ export const models: CashFlowModel[] = [
         lineItemName: 'Customer Refunds',
       },
     ],
-    updatedAt: '2026-07-02T10:00:00Z',
+    updatedAt: '2026-07-08T10:00:00Z',
   },
   {
     id: 'emeaCashFlowModel',
@@ -494,140 +607,19 @@ export const models: CashFlowModel[] = [
     fiscalYear: 'FY26-27',
     description: 'EMEA-only rolling forecast, mirrors the NA model structure with regional drivers.',
     status: 'Draft',
-    lineItemIds: [],
+    rowLayout: [],
     history: [],
     updatedAt: '2026-06-10T09:00:00Z',
   },
 ]
 
 // ---------------------------------------------------------------------------
-// Forecast (Hike Analysis)
+// Forecast (Hike Analysis) — row values are computed on demand from the model's
+// rowLayout + lineItems via lib/rowEngine.ts; this record just identifies which model
+// and entity the forecast overlays.
 // ---------------------------------------------------------------------------
 
-const OPENING_BALANCE_START = 8400000
-
-function scenarioMultiplier(scenario: 'base' | 'bull' | 'bear', category: 'receipts' | 'disbursements') {
-  if (scenario === 'base') return 1
-  if (category === 'receipts') return scenario === 'bull' ? 1.06 : 0.94
-  return scenario === 'bull' ? 0.97 : 1.03
-}
-
-function buildForecastRows(): ForecastRow[] {
-  const inflowItems = lineItems.filter((li) => li.category === 'receipts')
-  const outflowItems = lineItems.filter((li) => li.category === 'disbursements')
-
-  const valueFor = (li: LineItem, p: Period) => {
-    if (p.isClosed) return { actual: li.actuals[p.key], forecast: li.forecast[p.key] }
-    const base = li.forecastMode === 'direct' ? li.directValues[p.key] : li.forecast[p.key]
-    const scenario: Record<string, number> = {}
-    ;(['base', 'bull', 'bear'] as const).forEach((s) => {
-      scenario[s] = Math.round(base * scenarioMultiplier(s, li.category))
-    })
-    return { forecast: base, scenario }
-  }
-
-  const childRow = (li: LineItem): ForecastRow => ({
-    id: li.id,
-    label: li.name,
-    kind: 'child',
-    category: li.category,
-    values: Object.fromEntries(periods.map((p) => [p.key, valueFor(li, p)])),
-  })
-
-  const sumRow = (id: string, label: string, items: LineItem[], category?: LineItemCategoryLocal): ForecastRow => ({
-    id,
-    label,
-    kind: 'total',
-    category,
-    values: Object.fromEntries(
-      periods.map((p) => {
-        let actual: number | undefined = p.isClosed ? 0 : undefined
-        let forecast = 0
-        const scenario: Record<string, number> = { base: 0, bull: 0, bear: 0 }
-        items.forEach((li) => {
-          const v = valueFor(li, p)
-          if (p.isClosed) {
-            actual = (actual ?? 0) + (v.actual ?? 0)
-            forecast += v.forecast ?? 0
-          } else {
-            forecast += v.forecast ?? 0
-            ;(['base', 'bull', 'bear'] as const).forEach((s) => {
-              scenario[s] += v.scenario?.[s] ?? 0
-            })
-          }
-        })
-        return [p.key, p.isClosed ? { actual, forecast } : { forecast, scenario }]
-      }),
-    ),
-  })
-
-  type LineItemCategoryLocal = 'receipts' | 'disbursements'
-
-  const inflowsGroup: ForecastRow = { id: 'inflowsGroup', label: 'Cash Inflows', kind: 'group', category: 'receipts', values: {} }
-  const inflowsTotal = sumRow('inflowsTotal', 'Total Cash Inflows', inflowItems, 'receipts')
-  const outflowsGroup: ForecastRow = { id: 'outflowsGroup', label: 'Cash Outflows', kind: 'group', category: 'disbursements', values: {} }
-  const outflowsTotal = sumRow('outflowsTotal', 'Total Cash Outflows', outflowItems, 'disbursements')
-
-  const netMovement: ForecastRow = {
-    id: 'netMovement',
-    label: 'Net Movement',
-    kind: 'total',
-    values: Object.fromEntries(
-      periods.map((p) => {
-        const inf = inflowsTotal.values[p.key]
-        const out = outflowsTotal.values[p.key]
-        if (p.isClosed) {
-          return [p.key, { actual: (inf.actual ?? 0) + (out.actual ?? 0), forecast: (inf.forecast ?? 0) + (out.forecast ?? 0) }]
-        }
-        const scenario: Record<string, number> = {}
-        ;(['base', 'bull', 'bear'] as const).forEach((s) => {
-          scenario[s] = (inf.scenario?.[s] ?? 0) + (out.scenario?.[s] ?? 0)
-        })
-        return [p.key, { forecast: (inf.forecast ?? 0) + (out.forecast ?? 0), scenario }]
-      }),
-    ),
-  }
-
-  const openingBalance: ForecastRow = { id: 'openingBalance', label: 'Opening Balance', kind: 'balance', values: {} }
-  const endingBalance: ForecastRow = { id: 'endingBalance', label: 'Ending Balance', kind: 'balance', values: {} }
-
-  let runningActual = OPENING_BALANCE_START
-  let runningForecast = OPENING_BALANCE_START
-  const runningScenario: Record<string, number> = { base: OPENING_BALANCE_START, bull: OPENING_BALANCE_START, bear: OPENING_BALANCE_START }
-
-  periods.forEach((p) => {
-    if (p.isClosed) {
-      openingBalance.values[p.key] = { actual: runningActual, forecast: runningForecast }
-      const net = netMovement.values[p.key]
-      runningActual += net.actual ?? 0
-      runningForecast += net.forecast ?? 0
-      endingBalance.values[p.key] = { actual: runningActual, forecast: runningForecast }
-      runningScenario.base = runningActual
-      runningScenario.bull = runningActual
-      runningScenario.bear = runningActual
-    } else {
-      openingBalance.values[p.key] = { forecast: runningScenario.base, scenario: { ...runningScenario } }
-      const net = netMovement.values[p.key]
-      ;(['base', 'bull', 'bear'] as const).forEach((s) => {
-        runningScenario[s] += net.scenario?.[s] ?? 0
-      })
-      runningForecast += net.forecast ?? 0
-      endingBalance.values[p.key] = { forecast: runningForecast, scenario: { ...runningScenario } }
-    }
-  })
-
-  return [
-    openingBalance,
-    inflowsGroup,
-    ...inflowItems.map(childRow),
-    inflowsTotal,
-    outflowsGroup,
-    ...outflowItems.map(childRow),
-    outflowsTotal,
-    netMovement,
-    endingBalance,
-  ]
-}
+export const OPENING_BALANCE_START = 8400000
 
 export const forecast: Forecast = {
   id: 'hikeAnalysis',
@@ -635,5 +627,4 @@ export const forecast: Forecast = {
   entity: 'ChargePoint Inc (Consolidated)',
   modelId: 'chargepointCashFlowModel',
   periods,
-  rows: buildForecastRows(),
 }
