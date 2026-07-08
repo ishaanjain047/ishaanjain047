@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { Sidebar } from './components/Sidebar'
 import { StoreProvider } from './lib/store'
+import BuildWithAIPage from './pages/BuildWithAIPage'
 import DriverRegistryPage from './pages/DriverRegistryPage'
 import ModelsListPage from './pages/ModelsListPage'
 import ModelWorksheetPage from './pages/ModelWorksheetPage'
@@ -19,6 +20,7 @@ export default function App() {
             <Route path="/" element={<Navigate to="/models" replace />} />
             <Route path="/treasury" element={<TreasuryPage />} />
             <Route path="/models" element={<ModelsListPage />} />
+            <Route path="/models/build-with-ai" element={<BuildWithAIPage />} />
             <Route path="/models/:modelId" element={<ModelWorksheetPage />} />
             <Route path="/forecasts" element={<ForecastsListPage />} />
             <Route path="/forecasts/:forecastId" element={<ForecastDetailPage />} />

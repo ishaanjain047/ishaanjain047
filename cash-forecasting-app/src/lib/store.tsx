@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useMemo, useState } from 'react'
 import {
   CURRENT_USER,
+  buildDefaultStructure,
   drivers as seedDrivers,
   lineItems as seedLineItems,
   models as seedModels,
@@ -205,13 +206,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
     function addModel(input: { name: string; fiscalYear: string; description: string }) {
       const id = `model_${Date.now()}`
+      // Create Manually and Build with AI both converge on the same default structure
+      // (Section 3) — every new model gets the full ChargePoint line-item layout,
+      // entirely empty (em-dash) until drivers are wired, per Section 1.6.
+      const { rowLayout: newRowLayout, lineItems: newLineItems } = buildDefaultStructure(`${id}_`)
+      setLineItems((prev) => [...prev, ...newLineItems])
       const model: CashFlowModel = {
         id,
         name: input.name,
         fiscalYear: input.fiscalYear,
         description: input.description,
         status: 'Draft',
-        rowLayout: [],
+        rowLayout: newRowLayout,
         history: [],
         updatedAt: nowIso(),
       }

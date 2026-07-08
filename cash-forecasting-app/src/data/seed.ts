@@ -397,7 +397,13 @@ function wireFormula(item: LineItem, formula: string, base: number, amp: number,
   return { ...item, forecastMode: 'formula', formula, actualsMode: 'formula', actualsFormula: formula, actuals, forecast }
 }
 
-const leaves: LineItem[] = [
+// Builds one full copy of the ChargePoint default line-item structure — names, nesting,
+// and order exactly per the workbook, every leaf empty. Parameterized by an id prefix so
+// every new model (Create Manually or Build with AI both converge on this, per spec
+// Section 3) gets its own independent set of row/line-item ids rather than aliasing the
+// single seeded ChargePoint model's records.
+function buildRawDefaultStructure(): { rowLayout: RowDef[]; lineItems: LineItem[] } {
+  const leaves: LineItem[] = [
   // --- RECEIPTS — Collections — North American entities ---
   emptyLeaf('colNA_cpInc', 'CP Inc.', 'receipts'),
   emptyLeaf('colNA_cpCanada', 'CP Canada Inc.', 'receipts'),
@@ -462,9 +468,112 @@ const leaves: LineItem[] = [
   emptyLeaf('debtPaydown', 'Debt paydown', 'disbursements'),
   emptyLeaf('debtAdditionsDraws', 'Debt additions/draws', 'disbursements'),
   emptyLeaf('fxEffects', 'FX effects', 'disbursements'),
-]
+  ]
 
-const leavesById = Object.fromEntries(leaves.map((li) => [li.id, li]))
+  const leavesById = Object.fromEntries(leaves.map((li) => [li.id, li]))
+
+  function leafRow(id: string, category: 'receipts' | 'disbursements', parentId?: string): RowDef {
+    return { id, name: leavesById[id].name, kind: 'leaf', category, parentId, lineItemId: id }
+  }
+
+  const collectionsNA = ['colNA_cpInc', 'colNA_cpCanada', 'colNA_cpMexico', 'colNA_eaton']
+  const collectionsEU = [
+    'colEU_cpIndia', 'colEU_cpAustria', 'colEU_cpFranceSAS', 'colEU_cpGermany', 'colEU_cpUK',
+    'colEU_cpNetherlands', 'colEU_cpItaly', 'colEU_cpSpain', 'colEU_cpEuropeanHoldings',
+  ]
+  const roamingPartner = ['roam_cpInc', 'roam_cpCanada', 'roam_cpNetherlands', 'roam_cpAustria', 'roam_roamingVendor']
+  const driversGroup = ['drv_driverFunds', 'drv_flexBilling']
+  const austriaGroup = ['austriaGrp_driverFunds', 'austriaGrp_communityRefunds']
+  const payrollGroup = [
+    'payroll_cpInc', 'payroll_cpCanada', 'payroll_cpMexico', 'payroll_cpIndia', 'payroll_cpAustria',
+    'payroll_cpFranceSAS', 'payroll_cpGermany', 'payroll_cpUK', 'payroll_cpNetherlands', 'payroll_cpItaly',
+    'payroll_cpSpain', 'payroll_severance',
+  ]
+  const operatingLeaves = [
+    'accountsPayable', 'contractManufacturerPayments', 'inventoryPayments',
+    'contractManufacturerSettlements', 'taxPayments', 'otherExpenses',
+  ]
+  const otherLeaves = [
+    'interestIncome', 'atmSales', 'ghgCredits', 'tariffRefunds', 'interestPaymentsDebtFees',
+    'bankFees', 'debtPaydown', 'debtAdditionsDraws', 'fxEffects',
+  ]
+
+  const rowLayout: RowDef[] = [
+    // RECEIPTS
+    { id: 'grpCollections', name: 'Collections', kind: 'group', category: 'receipts', sumIds: ['subtotalNACollections', 'subtotalEUCollections'] },
+    ...collectionsNA.map((id) => leafRow(id, 'receipts', 'grpCollections')),
+    { id: 'subtotalNACollections', name: 'Total North American Collections', kind: 'subtotal', category: 'receipts', parentId: 'grpCollections', sumIds: collectionsNA },
+    ...collectionsEU.map((id) => leafRow(id, 'receipts', 'grpCollections')),
+    { id: 'subtotalEUCollections', name: 'Total European Collections', kind: 'subtotal', category: 'receipts', parentId: 'grpCollections', sumIds: collectionsEU },
+    leafRow('customerRefunds', 'receipts'),
+    leafRow('cashSaleWebstore', 'receipts'),
+    { id: 'grpRoamingPartner', name: 'Roaming Partner', kind: 'group', category: 'receipts', sumIds: roamingPartner },
+    ...roamingPartner.map((id) => leafRow(id, 'receipts', 'grpRoamingPartner')),
+    { id: 'grpDrivers', name: 'Drivers', kind: 'group', category: 'receipts', sumIds: driversGroup },
+    ...driversGroup.map((id) => leafRow(id, 'receipts', 'grpDrivers')),
+    { id: 'grpAustriaStandalone', name: 'ChargePoint Austria GmbH', kind: 'group', category: 'receipts', sumIds: austriaGroup },
+    ...austriaGroup.map((id) => leafRow(id, 'receipts', 'grpAustriaStandalone')),
+    leafRow('otherReceipts', 'receipts'),
+    {
+      id: 'totalReceipts',
+      name: 'Total Receipts',
+      kind: 'total',
+      category: 'receipts',
+      sumIds: ['grpCollections', 'customerRefunds', 'cashSaleWebstore', 'grpRoamingPartner', 'grpDrivers', 'grpAustriaStandalone', 'otherReceipts'],
+    },
+
+    // DISBURSEMENTS
+    { id: 'grpPayroll', name: 'Payroll', kind: 'group', category: 'disbursements', sumIds: payrollGroup },
+    ...payrollGroup.map((id) => leafRow(id, 'disbursements', 'grpPayroll')),
+    ...operatingLeaves.map((id) => leafRow(id, 'disbursements')),
+    {
+      id: 'totalOperatingDisbursements',
+      name: 'Total Operating Disbursements',
+      kind: 'total',
+      category: 'disbursements',
+      sumIds: ['grpPayroll', ...operatingLeaves],
+    },
+    ...otherLeaves.map((id) => leafRow(id, 'disbursements')),
+    { id: 'totalOther', name: 'Total Other', kind: 'total', category: 'disbursements', sumIds: otherLeaves },
+    {
+      id: 'netDisbursements',
+      name: 'Net Disbursements',
+      kind: 'total',
+      category: 'disbursements',
+      sumIds: ['totalOperatingDisbursements', 'totalOther'],
+    },
+  ]
+
+  return { rowLayout, lineItems: leaves }
+}
+
+function prefixStructure(prefix: string, structure: { rowLayout: RowDef[]; lineItems: LineItem[] }): {
+  rowLayout: RowDef[]
+  lineItems: LineItem[]
+} {
+  if (!prefix) return structure
+  const pid = (id: string) => `${prefix}${id}`
+  return {
+    lineItems: structure.lineItems.map((li) => ({ ...li, id: pid(li.id) })),
+    rowLayout: structure.rowLayout.map((r) => ({
+      ...r,
+      id: pid(r.id),
+      parentId: r.parentId ? pid(r.parentId) : undefined,
+      sumIds: r.sumIds?.map(pid),
+      lineItemId: r.lineItemId ? pid(r.lineItemId) : undefined,
+    })),
+  }
+}
+
+// Builds a fresh, independent copy of the default ChargePoint structure for a new model
+// — used by both the Create Manually and Build with AI paths (Section 3: they converge
+// on the exact same underlying Model/LineItem objects, just a different authoring UI).
+export function buildDefaultStructure(prefix = ''): { rowLayout: RowDef[]; lineItems: LineItem[] } {
+  return prefixStructure(prefix, buildRawDefaultStructure())
+}
+
+const seedStructure = buildDefaultStructure('')
+const leavesById: Record<string, LineItem> = Object.fromEntries(seedStructure.lineItems.map((li) => [li.id, li]))
 
 // Wire a handful of representative leaves to existing Driver Registry drivers, so the
 // worksheet/forecast still demonstrate real formula + driver behavior. Every other leaf
@@ -475,87 +584,14 @@ leavesById['payroll_cpInc'] = wireFormula(leavesById['payroll_cpInc'], 'payrollN
 leavesById['accountsPayable'] = wireFormula(leavesById['accountsPayable'], '-(vendorTier1History * apTier1Calibration)', -812000, 60000, 0.8)
 leavesById['otherReceipts'] = wireFormula(leavesById['otherReceipts'], 'planAllocationQ3', 100000, 8000, 1.2)
 
-export const lineItems: LineItem[] = leaves.map((li) => leavesById[li.id])
+export const lineItems: LineItem[] = seedStructure.lineItems.map((li) => leavesById[li.id])
 export const lineItemsById = Object.fromEntries(lineItems.map((li) => [li.id, li]))
 export const driversById = Object.fromEntries(drivers.map((d) => [d.id, d]))
 
-// ---------------------------------------------------------------------------
 // Row layout — structure only (names, nesting, order). Values are computed at render
 // time from lineItemsById via lib/rowEngine.ts, shared by the Model Worksheet and
 // Forecast Detail pages so both surfaces render identically, per spec.
-// ---------------------------------------------------------------------------
-
-function leafRow(id: string, category: 'receipts' | 'disbursements', parentId?: string): RowDef {
-  return { id, name: leavesById[id].name, kind: 'leaf', category, parentId, lineItemId: id }
-}
-
-const collectionsNA = ['colNA_cpInc', 'colNA_cpCanada', 'colNA_cpMexico', 'colNA_eaton']
-const collectionsEU = [
-  'colEU_cpIndia', 'colEU_cpAustria', 'colEU_cpFranceSAS', 'colEU_cpGermany', 'colEU_cpUK',
-  'colEU_cpNetherlands', 'colEU_cpItaly', 'colEU_cpSpain', 'colEU_cpEuropeanHoldings',
-]
-const roamingPartner = ['roam_cpInc', 'roam_cpCanada', 'roam_cpNetherlands', 'roam_cpAustria', 'roam_roamingVendor']
-const driversGroup = ['drv_driverFunds', 'drv_flexBilling']
-const austriaGroup = ['austriaGrp_driverFunds', 'austriaGrp_communityRefunds']
-const payrollGroup = [
-  'payroll_cpInc', 'payroll_cpCanada', 'payroll_cpMexico', 'payroll_cpIndia', 'payroll_cpAustria',
-  'payroll_cpFranceSAS', 'payroll_cpGermany', 'payroll_cpUK', 'payroll_cpNetherlands', 'payroll_cpItaly',
-  'payroll_cpSpain', 'payroll_severance',
-]
-const operatingLeaves = [
-  'accountsPayable', 'contractManufacturerPayments', 'inventoryPayments',
-  'contractManufacturerSettlements', 'taxPayments', 'otherExpenses',
-]
-const otherLeaves = [
-  'interestIncome', 'atmSales', 'ghgCredits', 'tariffRefunds', 'interestPaymentsDebtFees',
-  'bankFees', 'debtPaydown', 'debtAdditionsDraws', 'fxEffects',
-]
-
-export const rowLayout: RowDef[] = [
-  // RECEIPTS
-  { id: 'grpCollections', name: 'Collections', kind: 'group', category: 'receipts', sumIds: ['subtotalNACollections', 'subtotalEUCollections'] },
-  ...collectionsNA.map((id) => leafRow(id, 'receipts', 'grpCollections')),
-  { id: 'subtotalNACollections', name: 'Total North American Collections', kind: 'subtotal', category: 'receipts', parentId: 'grpCollections', sumIds: collectionsNA },
-  ...collectionsEU.map((id) => leafRow(id, 'receipts', 'grpCollections')),
-  { id: 'subtotalEUCollections', name: 'Total European Collections', kind: 'subtotal', category: 'receipts', parentId: 'grpCollections', sumIds: collectionsEU },
-  leafRow('customerRefunds', 'receipts'),
-  leafRow('cashSaleWebstore', 'receipts'),
-  { id: 'grpRoamingPartner', name: 'Roaming Partner', kind: 'group', category: 'receipts', sumIds: roamingPartner },
-  ...roamingPartner.map((id) => leafRow(id, 'receipts', 'grpRoamingPartner')),
-  { id: 'grpDrivers', name: 'Drivers', kind: 'group', category: 'receipts', sumIds: driversGroup },
-  ...driversGroup.map((id) => leafRow(id, 'receipts', 'grpDrivers')),
-  { id: 'grpAustriaStandalone', name: 'ChargePoint Austria GmbH', kind: 'group', category: 'receipts', sumIds: austriaGroup },
-  ...austriaGroup.map((id) => leafRow(id, 'receipts', 'grpAustriaStandalone')),
-  leafRow('otherReceipts', 'receipts'),
-  {
-    id: 'totalReceipts',
-    name: 'Total Receipts',
-    kind: 'total',
-    category: 'receipts',
-    sumIds: ['grpCollections', 'customerRefunds', 'cashSaleWebstore', 'grpRoamingPartner', 'grpDrivers', 'grpAustriaStandalone', 'otherReceipts'],
-  },
-
-  // DISBURSEMENTS
-  { id: 'grpPayroll', name: 'Payroll', kind: 'group', category: 'disbursements', sumIds: payrollGroup },
-  ...payrollGroup.map((id) => leafRow(id, 'disbursements', 'grpPayroll')),
-  ...operatingLeaves.map((id) => leafRow(id, 'disbursements')),
-  {
-    id: 'totalOperatingDisbursements',
-    name: 'Total Operating Disbursements',
-    kind: 'total',
-    category: 'disbursements',
-    sumIds: ['grpPayroll', ...operatingLeaves],
-  },
-  ...otherLeaves.map((id) => leafRow(id, 'disbursements')),
-  { id: 'totalOther', name: 'Total Other', kind: 'total', category: 'disbursements', sumIds: otherLeaves },
-  {
-    id: 'netDisbursements',
-    name: 'Net Disbursements',
-    kind: 'total',
-    category: 'disbursements',
-    sumIds: ['totalOperatingDisbursements', 'totalOther'],
-  },
-]
+export const rowLayout: RowDef[] = seedStructure.rowLayout
 
 // ---------------------------------------------------------------------------
 // Cash Flow Models
